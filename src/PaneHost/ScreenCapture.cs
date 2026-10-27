@@ -23,6 +23,8 @@ public sealed class ScreenCapture : IDisposable
     private IDXGIOutputDuplication _dupl = null!;
     private ID3D11Texture2D _staging = null!;
     private bool _needFullFrame = true;
+    private bool _needReinit;
+    private bool _loggedLost;
 
     public void Initialize()
     {
@@ -82,6 +84,8 @@ public sealed class ScreenCapture : IDisposable
         });
 
         _needFullFrame = true;
+        _needReinit = false;
+        _loggedLost = false;
         chosenOutput.Dispose();
         chosenAdapter.Dispose();
     }
@@ -93,23 +97,50 @@ public sealed class ScreenCapture : IDisposable
     /// </summary>
     public List<FrameRect> Capture(int timeoutMs)
     {
+        // Rebuild the duplication after a desktop switch (UAC secure desktop, lock screen, resolution
+        // change, session reconnect). While the secure desktop is up, DuplicateOutput keeps failing, so we
+        // just keep retrying on later calls and return no changes — the client holds its last frame and the
+        // session stays alive, then resumes automatically when the normal desktop returns.
+        if (_needReinit)
+        {
+            try { Initialize(); }
+            catch
+            {
+                if (!_loggedLost) { Log.Info("Display unavailable (UAC/secure desktop or switch); waiting to resume..."); _loggedLost = true; }
+                Thread.Sleep(150);
+                return new List<FrameRect>();
+            }
+            Log.Info("Display reacquired; resuming capture.");
+        }
+
+        try
+        {
         var result = _dupl.AcquireNextFrame((uint)timeoutMs, out var frameInfo, out var desktopResource);
         if (result == Vortice.DXGI.ResultCode.WaitTimeout)
             return new List<FrameRect>();
         if (result == Vortice.DXGI.ResultCode.AccessLost)
         {
-            Initialize();
+            _needReinit = true;
             return new List<FrameRect>();
         }
         result.CheckError();
 
         try
         {
-            using var tex = desktopResource!.QueryInterface<ID3D11Texture2D>();
+            // A cursor-only update (mouse moved but the desktop image is unchanged) returns success with
+            // no usable desktop image: LastPresentTime == 0, and the resource may be null. There is nothing
+            // new to send, so skip it. Without this guard, dereferencing the resource threw NullReference.
+            bool hasNewImage = desktopResource != null && frameInfo.LastPresentTime != 0;
+            if (!hasNewImage && !_needFullFrame)
+                return new List<FrameRect>();
+            if (desktopResource == null)
+                return new List<FrameRect>();
+
+            using var tex = desktopResource.QueryInterface<ID3D11Texture2D>();
             _context.CopyResource(_staging, tex);
 
             var rects = new List<Vortice.RawRect>();
-            if (_needFullFrame || frameInfo.AccumulatedFrames == 0)
+            if (_needFullFrame)
             {
                 rects.Add(new Vortice.RawRect(0, 0, Width, Height));
                 _needFullFrame = false;
@@ -126,6 +157,14 @@ public sealed class ScreenCapture : IDisposable
         {
             desktopResource?.Dispose();
             _dupl.ReleaseFrame();
+        }
+        }
+        catch (Exception)
+        {
+            // Any device/duplication failure (device removed, desktop switch mid-call): rebuild next time
+            // instead of killing the session.
+            _needReinit = true;
+            return new List<FrameRect>();
         }
     }
 

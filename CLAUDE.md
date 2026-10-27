@@ -18,6 +18,7 @@ without built-in Remote Desktop. Encrypted, pairing-key gated, LAN auto-discover
 - src/PaneHostSetup/ - one-click installer that embeds the published host exe and runs it with --install
 - tests/LoopbackTest/ - headless end-to-end protocol check
 - scripts/build.ps1 - publishes all three exes; stages host into the setup's embed/ folder
+- assets/ - logo (pane-logo.svg/.png) and app icon (pane.ico), wired as ApplicationIcon
 - docs/ - architecture notes
 
 ## Rules

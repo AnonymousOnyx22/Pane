@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Principal;
+using Microsoft.Win32;
 using Pane.Protocol;
 
 namespace PaneHost;
@@ -63,6 +64,17 @@ public static class Installer
         Run("netsh", $"advfirewall firewall add rule name=\"Pane Host UDP\" dir=in action=allow protocol=UDP localport={Net.DiscoveryPort}");
         Console.WriteLine($"  Firewall opened for TCP {Net.TcpPort} and UDP {Net.DiscoveryPort}.");
 
+        // 4b. Show UAC prompts on the normal (capturable) desktop instead of the secure desktop, so admin
+        //     prompts are visible and clickable through Pane. UAC still asks for consent; it just isn't
+        //     hidden on a desktop that screen capture cannot see.
+        try
+        {
+            using var k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System");
+            k!.SetValue("PromptOnSecureDesktop", 0, RegistryValueKind.DWord);
+            Console.WriteLine("  UAC prompts set to appear on the normal desktop (clickable through Pane).");
+        }
+        catch (Exception ex) { Console.WriteLine("  Could not adjust UAC secure-desktop setting: " + ex.Message); }
+
         // 5. Start it now (detached), so there is no wait for the next logon.
         try
         {
@@ -93,6 +105,12 @@ public static class Installer
         Run("schtasks", $"/Delete /TN \"{TaskName}\" /F");
         Run("netsh", "advfirewall firewall delete rule name=\"Pane Host TCP\"");
         Run("netsh", "advfirewall firewall delete rule name=\"Pane Host UDP\"");
+        try
+        {
+            using var k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System");
+            k!.SetValue("PromptOnSecureDesktop", 1, RegistryValueKind.DWord); // restore Windows default
+        }
+        catch { }
         foreach (var p in Process.GetProcessesByName("PaneHost"))
             if (p.Id != Environment.ProcessId) try { p.Kill(true); } catch { }
         Console.WriteLine("Pane Host uninstalled (config left in " + HostConfig.Dir + ").");

@@ -10,6 +10,7 @@
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\..\assets\pane.ico</ApplicationIcon>
   </PropertyGroup>
 
   <!-- The published host exe is staged into embed/ by scripts/build.ps1 and embedded here,

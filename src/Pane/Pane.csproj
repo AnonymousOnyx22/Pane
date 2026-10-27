@@ -15,6 +15,7 @@
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\..\assets\pane.ico</ApplicationIcon>
   </PropertyGroup>
 
 </Project>

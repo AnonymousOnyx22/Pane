@@ -4,8 +4,10 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
 using System.Windows;
+using System.Runtime.InteropServices;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
@@ -48,7 +50,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         Opacity = 0;
         SizeChanged += (_, __) => UpdateClip();
-        Loaded += (_, __) => { UpdateClip(); PlayIntro(); };
+        StateChanged += (_, __) => UpdateChrome();
+        Loaded += (_, __) => { UpdateClip(); UpdateChrome(); PlayIntro(); };
 
         _discovery.HostSeen += OnHostSeen;
         try { _discovery.Start(); } catch { /* another listener may hold the port */ }
@@ -60,7 +63,30 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Closed += (_, __) => { _discovery.Dispose(); foreach (var t in Tabs) (t.Content as IDisposable)?.Dispose(); };
     }
 
-    private void UpdateClip() => ClipGeo.Rect = new Rect(0, 0, ActualWidth, ActualHeight);
+    private void UpdateClip()
+    {
+        double r = WindowState == WindowState.Maximized ? 0 : 14;
+        ClipGeo.RadiusX = ClipGeo.RadiusY = r;
+        ClipGeo.Rect = new Rect(0, 0, ActualWidth, ActualHeight);
+    }
+
+    /// <summary>Keep the frameless chrome correct across normal/maximized: button glyph, corners, border.</summary>
+    private void UpdateChrome()
+    {
+        bool max = WindowState == WindowState.Maximized;
+        MaxBtn.Content = max ? "⧉" : "□";
+        MaxBtn.ToolTip = max ? "Restore" : "Maximize";
+        Shell.CornerRadius = new CornerRadius(max ? 0 : 14);
+        Shell.BorderThickness = new Thickness(max ? 0 : 1);
+        UpdateClip();
+    }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        var handle = new WindowInteropHelper(this).Handle;
+        HwndSource.FromHwnd(handle)?.AddHook(WindowProc);
+    }
 
     // --- intro + transitions ---
 
@@ -201,8 +227,56 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void TitleBar_Drag(object sender, MouseButtonEventArgs e)
     {
-        if (e.ButtonState == MouseButtonState.Pressed && e.ClickCount == 1) DragMove();
+        if (e.ButtonState != MouseButtonState.Pressed) return;
+        if (e.ClickCount == 2) { ToggleMaximize(); return; }
+        if (WindowState == WindowState.Maximized) return; // don't drag a maximized window
+        DragMove();
     }
+
+    private void Maximize_Click(object sender, RoutedEventArgs e) => ToggleMaximize();
+
+    private void ToggleMaximize() =>
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+
+    // Keep a maximized frameless window inside the monitor work area (so it never covers the taskbar and
+    // its edges aren't clipped by the resize border).
+    private const int WM_GETMINMAXINFO = 0x0024;
+    private const int MONITOR_DEFAULTTONEAREST = 0x00000002;
+
+    private IntPtr WindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WM_GETMINMAXINFO)
+        {
+            var mmi = Marshal.PtrToStructure<MINMAXINFO>(lParam);
+            IntPtr monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if (monitor != IntPtr.Zero)
+            {
+                var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+                if (GetMonitorInfo(monitor, ref mi))
+                {
+                    mmi.ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
+                    mmi.ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top;
+                    mmi.ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
+                    mmi.ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
+                    mmi.ptMinTrackSize.x = (int)MinWidth;
+                    mmi.ptMinTrackSize.y = (int)MinHeight;
+                    Marshal.StructureToPtr(mmi, lParam, true);
+                }
+            }
+            handled = true;
+        }
+        return IntPtr.Zero;
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct POINTL { public int x, y; }
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int left, top, right, bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MINMAXINFO { public POINTL ptReserved, ptMaxSize, ptMaxPosition, ptMinTrackSize, ptMaxTrackSize; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO { public int cbSize; public RECT rcMonitor; public RECT rcWork; public int dwFlags; }
+
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, int flags);
+    [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO mi);
 
     private void Tab_Click(object sender, MouseButtonEventArgs e)
     {

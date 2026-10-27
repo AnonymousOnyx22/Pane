@@ -1,0 +1,9 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Pane logo">
+  <rect x="1" y="1" width="254" height="254" rx="56" fill="#000000"/>
+  <rect x="1.5" y="1.5" width="253" height="253" rx="55.5" stroke="#262626" stroke-width="3"/>
+  <!-- four panes: top-left filled, the rest outlined -->
+  <rect x="64" y="64" width="56" height="56" rx="12" fill="#FFFFFF"/>
+  <rect x="139" y="64" width="53" height="53" rx="12" stroke="#FFFFFF" stroke-width="7"/>
+  <rect x="64" y="139" width="53" height="53" rx="12" stroke="#FFFFFF" stroke-width="7"/>
+  <rect x="139" y="139" width="53" height="53" rx="12" stroke="#FFFFFF" stroke-width="7"/>
+</svg>

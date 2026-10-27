@@ -1,4 +1,20 @@
-# Pane
+<p align="center">
+  <img src="assets/pane-logo.png" width="112" alt="Pane logo"/>
+</p>
+
+<h1 align="center">Pane</h1>
+
+<p align="center"><b>A minimal black-and-white remote desktop for Windows.</b><br/>
+Two tiny apps that are entirely yours — encrypted, pairing-key gated, and LAN-only.</p>
+
+<p align="center">
+  <img alt=".NET 8" src="https://img.shields.io/badge/.NET-8.0-111111">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%20|%2011-111111">
+  <img alt="UI" src="https://img.shields.io/badge/UI-WPF-111111">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-111111">
+</p>
+
+---
 
 A minimal, custom Windows remote desktop built as two small programs:
 

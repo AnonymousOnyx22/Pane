@@ -13,7 +13,7 @@
     </WindowChrome.WindowChrome>
 
     <!-- Outer rounded shell -->
-    <Border Background="{StaticResource Bg}" CornerRadius="14" BorderBrush="{StaticResource Line}" BorderThickness="1"
+    <Border x:Name="Shell" Background="{StaticResource Bg}" CornerRadius="14" BorderBrush="{StaticResource Line}" BorderThickness="1"
             RenderTransformOrigin="0.5,0.5">
         <Border.RenderTransform>
             <ScaleTransform x:Name="IntroScale" ScaleX="1" ScaleY="1"/>
@@ -68,8 +68,9 @@
 
                 <!-- Window buttons -->
                 <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="6,0,8,0" VerticalAlignment="Center">
-                    <Button Content="&#x2013;" Style="{StaticResource ChromeButton}" Click="Minimize_Click"/>
-                    <Button Content="&#x2715;" Style="{StaticResource ChromeButton}" Click="Close_Click"/>
+                    <Button Content="&#x2013;" Style="{StaticResource ChromeButton}" Click="Minimize_Click" ToolTip="Minimize"/>
+                    <Button x:Name="MaxBtn" Content="&#x25A1;" Style="{StaticResource ChromeButton}" Click="Maximize_Click" ToolTip="Maximize"/>
+                    <Button Content="&#x2715;" Style="{StaticResource ChromeButton}" Click="Close_Click" ToolTip="Close"/>
                 </StackPanel>
             </Grid>
 

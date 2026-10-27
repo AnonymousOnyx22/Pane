@@ -44,29 +44,35 @@ public sealed class Session : IDisposable
             var injector = new InputInjector(capture.ScreenX, capture.ScreenY, capture.Width, capture.Height);
             await channel.SendAsync(Messages.ScreenInfo(capture.Width, capture.Height), ct);
 
-            var captureLoop = Task.Run(() => CaptureLoop(channel, capture, ct), ct);
-            var inputLoop = Task.Run(() => InputLoop(channel, injector, capture, ct), ct);
+            using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var captureLoop = Task.Run(() => CaptureLoop(channel, capture, sessionCts.Token), sessionCts.Token);
+            var inputLoop = Task.Run(() => InputLoop(channel, injector, capture, sessionCts.Token), sessionCts.Token);
             await Task.WhenAny(captureLoop, inputLoop);
+            // One loop ended (usually the client disconnected). Stop the other and let both finish before
+            // the capture device is disposed, so the capture loop never touches a disposed device.
+            sessionCts.Cancel();
+            try { await Task.WhenAll(captureLoop, inputLoop); } catch { }
         }
         Log.Info($"Client {_remote} disconnected.");
     }
 
     private static async Task CaptureLoop(SecureChannel channel, ScreenCapture capture, CancellationToken ct)
     {
-        var frameInterval = TimeSpan.FromMilliseconds(1000.0 / 60); // cap at ~60fps
+        // AcquireNextFrame blocks until the next presented frame (or the timeout), so it paces the loop to
+        // the monitor's own refresh. An extra Task.Delay only adds latency, so there isn't one — this keeps
+        // motion as smooth as the link allows.
         while (!ct.IsCancellationRequested)
         {
-            var start = DateTime.UtcNow;
             List<FrameRect> rects;
-            try { rects = capture.Capture(100); }
-            catch (Exception ex) { Log.Info($"Capture error: {ex.Message}"); break; }
+            try { rects = capture.Capture(200); }
+            catch (Exception ex)
+            {
+                if (!ct.IsCancellationRequested) Log.Info($"Capture error: {ex.Message}");
+                break;
+            }
 
             if (rects.Count > 0)
                 await channel.SendAsync(Messages.Frame(rects), ct);
-
-            var elapsed = DateTime.UtcNow - start;
-            if (elapsed < frameInterval)
-                await Task.Delay(frameInterval - elapsed, ct);
         }
     }
 

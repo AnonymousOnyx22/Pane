@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using Pane.Protocol;
 using PaneHost;
 
@@ -7,14 +8,28 @@ using PaneHost;
 //   --install     copy to ProgramData, register logon task, open firewall, start, print key
 //   --uninstall   remove task + firewall rules, stop host
 //   --key         print the pairing key for this host
-//   (no args)     run as the background host service
+//   (no args)     run as the background host service (headless: WinExe, no console window)
 
-if (args.Contains("--install")) return Installer.Install();
-if (args.Contains("--uninstall")) return Installer.Uninstall();
-if (args.Contains("--key"))
+if (args.Contains("--install") || args.Contains("--uninstall") || args.Contains("--key"))
 {
+    EnsureConsole(); // attach to the caller's console so these commands can print
+    if (args.Contains("--install")) return Installer.Install();
+    if (args.Contains("--uninstall")) return Installer.Uninstall();
     Console.WriteLine(HostConfig.LoadOrCreate().PairingKey);
     return 0;
+}
+
+static void EnsureConsole()
+{
+    if (!ConsoleNative.AttachConsole(-1)) ConsoleNative.AllocConsole(); // -1 = ATTACH_PARENT_PROCESS
+    var stdout = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
+    Console.SetOut(stdout);
+}
+
+static class ConsoleNative
+{
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool AttachConsole(int dwProcessId);
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool AllocConsole();
 }
 
 // Single instance guard.

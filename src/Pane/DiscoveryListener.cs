@@ -33,7 +33,9 @@ public sealed class DiscoveryListener : IDisposable
             catch (OperationCanceledException) { break; }
             catch { continue; }
 
-            if (DiscoveryPacket.TryParse(res.Buffer, out var pkt))
+            var src = res.RemoteEndPoint.Address.GetAddressBytes();
+            bool linkLocal = src.Length == 4 && src[0] == 169 && src[1] == 254;
+            if (!linkLocal && DiscoveryPacket.TryParse(res.Buffer, out var pkt))
                 HostSeen?.Invoke(new DiscoveredHost(pkt.HostId, pkt.Name, res.RemoteEndPoint.Address.ToString(), pkt.TcpPort));
         }
     }
