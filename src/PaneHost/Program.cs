@@ -26,12 +26,6 @@ static void EnsureConsole()
     Console.SetOut(stdout);
 }
 
-static class ConsoleNative
-{
-    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool AttachConsole(int dwProcessId);
-    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool AllocConsole();
-}
-
 // Single instance guard.
 using var mutex = new Mutex(initiallyOwned: true, "Global\\PaneHostSingleton", out bool isNew);
 if (!isNew)
@@ -83,3 +77,9 @@ finally
     Log.Info("Pane Host stopped.");
 }
 return 0;
+
+static class ConsoleNative
+{
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool AttachConsole(int dwProcessId);
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool AllocConsole();
+}

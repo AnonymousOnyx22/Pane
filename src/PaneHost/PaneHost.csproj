@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- WinExe = no console window when the host runs in the background (headless). The CLI commands
-         (--install / --key / --uninstall) attach to the caller's console to print. -->
+    <!-- WinExe = no console window when the host runs headless in the background. The CLI commands
+         (install, key, uninstall) attach to the caller's console to print. -->
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
