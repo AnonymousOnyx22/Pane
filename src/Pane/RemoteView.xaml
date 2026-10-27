@@ -1,0 +1,20 @@
+<UserControl x:Class="Pane.RemoteView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{StaticResource Bg}" Focusable="True"
+             FocusVisualStyle="{x:Null}">
+    <Grid Background="{StaticResource Bg}">
+        <Image x:Name="Screen" Stretch="Uniform"
+               RenderOptions.BitmapScalingMode="LowQuality"
+               SnapsToDevicePixels="True"/>
+        <Border x:Name="Overlay" Background="#CC000000" Visibility="Visible">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                <TextBlock x:Name="StatusText" Text="Connecting..." Foreground="{StaticResource Fg}"
+                           FontSize="15" HorizontalAlignment="Center"/>
+                <Button x:Name="RetryBtn" Content="Reconnect" Style="{StaticResource GhostButton}"
+                        Margin="0,16,0,0" HorizontalAlignment="Center" Visibility="Collapsed"
+                        Click="Retry_Click"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>

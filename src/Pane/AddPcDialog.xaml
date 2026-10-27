@@ -1,0 +1,36 @@
+<Window x:Class="Pane.AddPcDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Add PC" Width="380" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner" WindowStyle="None" AllowsTransparency="True"
+        Background="Transparent" FontFamily="{StaticResource UiFont}" ShowInTaskbar="False">
+    <Border Background="{StaticResource Bg}" CornerRadius="14" BorderBrush="{StaticResource Line}" BorderThickness="1"
+            RenderTransformOrigin="0.5,0.4">
+        <Border.RenderTransform>
+            <ScaleTransform x:Name="DlgScale" ScaleX="0.96" ScaleY="0.96"/>
+        </Border.RenderTransform>
+        <StackPanel Margin="22">
+            <Grid>
+                <TextBlock Text="Add a PC" Foreground="{StaticResource Fg}" FontSize="16" FontWeight="SemiBold"/>
+                <Button Content="&#x2715;" Style="{StaticResource ChromeButton}" HorizontalAlignment="Right" Click="Cancel_Click"/>
+            </Grid>
+
+            <TextBlock Text="Name" Foreground="{StaticResource FgDim}" FontSize="12" Margin="2,18,0,6"/>
+            <TextBox x:Name="NameBox" Style="{StaticResource PaneTextBox}"/>
+
+            <TextBlock Text="IP address or hostname" Foreground="{StaticResource FgDim}" FontSize="12" Margin="2,14,0,6"/>
+            <TextBox x:Name="HostBox" Style="{StaticResource PaneTextBox}"/>
+
+            <TextBlock Text="Pairing key" Foreground="{StaticResource FgDim}" FontSize="12" Margin="2,14,0,6"/>
+            <TextBox x:Name="KeyBox" Style="{StaticResource PaneTextBox}"/>
+
+            <TextBlock x:Name="ErrorText" Foreground="{StaticResource Fg}" FontSize="12" Margin="2,12,0,0"
+                       TextWrapping="Wrap" Visibility="Collapsed"/>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+                <Button Content="Cancel" Style="{StaticResource GhostButton}" Margin="0,0,8,0" Click="Cancel_Click"/>
+                <Button Content="Add" Style="{StaticResource PillButton}" Click="Add_Click" IsDefault="True"/>
+            </StackPanel>
+        </StackPanel>
+    </Border>
+</Window>
