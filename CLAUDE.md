@@ -32,4 +32,7 @@ without built-in Remote Desktop. Encrypted, pairing-key gated, LAN auto-discover
 - Frames are JPEG (protocol v2). Client auto-reconnects. Global keyboard hook forwards Win/Alt+Tab to the
   remote while a session tab is foreground (mouse is the escape hatch). Host is headless; setup is windowless
   and shows the key in a dialog; installer sets UAC to auto-approve admin elevation. Primary monitor only.
+- File transfer: drag files/folders onto the remote screen to send them to the other PC's
+  Desktop\Pane Transfers; the "Files" panel browses the remote FS and downloads to Downloads\Pane Transfers.
+  (Fs.cs protocol, FileService.cs on host; chunked 1 MiB streams.)
 - Not yet field-tested on the two-PC setup with the v2 host (needs a one-time physical reinstall there).

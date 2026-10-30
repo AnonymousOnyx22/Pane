@@ -18,6 +18,21 @@ public enum MsgType : byte
     MouseWheel = 22,  // int delta, byte horizontal(1/0), float nx, float ny
     Key = 23,         // ushort vk, byte down(1/0), byte extended(1/0)
     RequestFullFrame = 24,
+
+    // File transfer, Client -> Host
+    ListDir = 40,       // string path ("" = list drives)
+    Download = 41,      // string path (file or folder)
+    UploadBegin = 42,   // string relPath, long size
+    UploadChunk = 43,   // raw bytes (remainder of message)
+    UploadEnd = 44,     // (none)
+
+    // File transfer, Host -> Client
+    DirListing = 60,    // string path, int count, then {string name, byte isDir, long size}
+    FileBegin = 61,     // string relPath, long size
+    FileChunk = 62,     // raw bytes
+    FileEnd = 63,       // (none)
+    TransferDone = 64,  // (none) marks the end of a Download (one file or a whole folder)
+    FsError = 65,       // string message
 }
 
 /// <summary>A changed rectangle of the screen, pixels as Deflate-compressed BGRA32 (stride = w*4).</summary>

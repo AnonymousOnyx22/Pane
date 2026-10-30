@@ -29,6 +29,10 @@ A minimal, custom Windows remote desktop built as two small programs:
 Everything is encrypted (ephemeral ECDH + AES-256-GCM) and gated by a **pairing key**, so nothing else on
 the network can connect.
 
+**Files:** drag files or folders onto the remote screen to send them to the other PC (they land in
+`Desktop\Pane Transfers`), or open the **Files** panel in a session to browse the remote machine and pull
+files back to `Downloads\Pane Transfers`.
+
 ## Install the host (on the PC you want to control)
 
 1. Copy **`dist\PaneHostSetup.exe`** to that PC and double-click it. Approve the UAC prompt.

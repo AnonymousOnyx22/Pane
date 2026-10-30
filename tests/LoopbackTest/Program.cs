@@ -24,6 +24,7 @@ if (!PairingKey.TryDecode(args[2], out var key))
     return 2;
 }
 bool measure = args.Length > 3 && args[3].Equals("measure", StringComparison.OrdinalIgnoreCase);
+bool filesTest = args.Length > 3 && args[3].Equals("files", StringComparison.OrdinalIgnoreCase);
 
 var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20)).Token;
 
@@ -46,6 +47,66 @@ try
     var (w, h) = Messages.ReadScreenInfo(first);
     Console.WriteLine($"PASS: screen info received: {w}x{h}.");
     if (w <= 0 || h <= 0) { Console.WriteLine("FAIL: bad screen dimensions."); return 1; }
+
+    if (filesTest)
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), "pane-files-test");
+        Directory.CreateDirectory(tmp);
+        var srcPath = Path.Combine(tmp, "sample.bin");
+        var rnd = new Random(1234);
+        var content = new byte[3 * 1024 * 1024 + 777]; // ~3 MiB, spans several chunks
+        rnd.NextBytes(content);
+        await File.WriteAllBytesAsync(srcPath, content, timeout);
+
+        // 1. UPLOAD: push the file; host should write it to Desktop\Pane Transfers\looptest\sample.bin
+        await channel.SendAsync(Fs.UploadBegin("looptest\\sample.bin", content.Length), timeout);
+        for (int off = 0; off < content.Length; off += Fs.ChunkSize)
+        {
+            int n = Math.Min(Fs.ChunkSize, content.Length - off);
+            var chunk = new byte[n];
+            Buffer.BlockCopy(content, off, chunk, 0, n);
+            await channel.SendAsync(Fs.UploadChunk(chunk, n), timeout);
+        }
+        await channel.SendAsync(Fs.UploadEnd(), timeout);
+        await Task.Delay(400);
+        var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        var uploaded = Path.Combine(desktop, "Pane Transfers", "looptest", "sample.bin");
+        if (File.Exists(uploaded) && (await File.ReadAllBytesAsync(uploaded)).Length == content.Length)
+            Console.WriteLine($"PASS: upload landed at {uploaded} ({content.Length / 1024} KiB).");
+        else { Console.WriteLine("FAIL: uploaded file missing or wrong size at " + uploaded); return 1; }
+
+        // 2. LIST: list the temp dir; expect to see sample.bin
+        await channel.SendAsync(Fs.ListDir(tmp), timeout);
+        // 3. DOWNLOAD: pull the file back and reassemble
+        await channel.SendAsync(Fs.Download(srcPath), timeout);
+
+        bool listed = false; long dlBytes = 0; bool done = false; MemoryStream? dl = null;
+        var tEnd = DateTime.UtcNow.AddSeconds(15);
+        while (DateTime.UtcNow < tEnd && !done)
+        {
+            var m = await channel.ReceiveAsync(timeout);
+            if (m == null) break;
+            switch (Messages.TypeOf(m))
+            {
+                case MsgType.DirListing:
+                    { var (_, entries) = Fs.ReadListing(m); if (entries.Exists(e => e.Name == "sample.bin")) listed = true; break; }
+                case MsgType.FileBegin: dl = new MemoryStream(); break;
+                case MsgType.FileChunk: { var s = Fs.ReadChunk(m); dl?.Write(s.Array!, s.Offset, s.Count); break; }
+                case MsgType.FileEnd: dlBytes = dl?.Length ?? 0; break;
+                case MsgType.TransferDone: done = true; break;
+                case MsgType.FsError: Console.WriteLine("FAIL: host FsError: " + Fs.ReadError(m)); return 1;
+            }
+        }
+        Console.WriteLine(listed ? "PASS: directory listing included the file." : "FAIL: listing did not include the file.");
+        if (!listed) return 1;
+        if (dl != null && dl.ToArray().AsSpan().SequenceEqual(content))
+            Console.WriteLine($"PASS: download round-tripped {dlBytes / 1024} KiB byte-for-byte.");
+        else { Console.WriteLine($"FAIL: download mismatch ({dlBytes} bytes)."); return 1; }
+
+        Console.WriteLine();
+        Console.WriteLine("ALL PASS");
+        return 0;
+    }
 
     if (measure)
     {

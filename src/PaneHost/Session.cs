@@ -45,8 +45,9 @@ public sealed class Session : IDisposable
             await channel.SendAsync(Messages.ScreenInfo(capture.Width, capture.Height), ct);
 
             using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var files = new FileService(channel, sessionCts.Token);
             var captureLoop = Task.Run(() => CaptureLoop(channel, capture, sessionCts.Token), sessionCts.Token);
-            var inputLoop = Task.Run(() => InputLoop(channel, injector, capture, sessionCts.Token), sessionCts.Token);
+            var inputLoop = Task.Run(() => InputLoop(channel, injector, capture, files, sessionCts.Token), sessionCts.Token);
             await Task.WhenAny(captureLoop, inputLoop);
             // One loop ended (usually the client disconnected). Stop the other and let both finish before
             // the capture device is disposed, so the capture loop never touches a disposed device.
@@ -76,7 +77,7 @@ public sealed class Session : IDisposable
         }
     }
 
-    private static async Task InputLoop(SecureChannel channel, InputInjector injector, ScreenCapture capture, CancellationToken ct)
+    private static async Task InputLoop(SecureChannel channel, InputInjector injector, ScreenCapture capture, FileService files, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -94,6 +95,18 @@ public sealed class Session : IDisposable
                     { var (vk, d, ext) = Messages.ReadKey(msg); injector.Key(vk, d, ext); break; }
                 case MsgType.RequestFullFrame:
                     capture.ForceFullFrame(); break;
+
+                // File transfer
+                case MsgType.ListDir:
+                    { var p = Fs.ReadPath(msg); _ = files.ListDirAsync(p); break; }
+                case MsgType.Download:
+                    { var p = Fs.ReadPath(msg); _ = Task.Run(() => files.DownloadAsync(p)); break; }
+                case MsgType.UploadBegin:
+                    { var (rp, sz) = Fs.ReadBegin(msg); files.UploadBegin(rp, sz); break; }
+                case MsgType.UploadChunk:
+                    files.UploadChunk(Fs.ReadChunk(msg)); break;
+                case MsgType.UploadEnd:
+                    files.UploadEnd(); break;
             }
         }
     }

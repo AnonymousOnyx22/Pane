@@ -1,11 +1,13 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Pane.Protocol;
@@ -50,6 +52,8 @@ public partial class RemoteView : UserControl, IDisposable
         _client.Connected += (w, h) => Dispatcher.Invoke(() => OnConnected(w, h));
         _client.FrameReceived += rects => Dispatcher.Invoke(() => OnFrame(rects));
         _client.Disconnected += reason => Dispatcher.Invoke(() => OnDisconnected(reason));
+        _client.DirListing += (path, entries) => Dispatcher.Invoke(() => OnDirListing(path, entries));
+        _client.TransferStatus += s => Dispatcher.Invoke(() => ShowToast(s));
         _client.Start(string.IsNullOrWhiteSpace(_pc.Host) ? _pc.Id : _pc.Host, Net.TcpPort, key);
     }
 
@@ -188,10 +192,109 @@ public partial class RemoteView : UserControl, IDisposable
         _ => false
     };
 
+    // --- file transfer UI ---
+
+    private bool _filesOpen;
+    private string? _currentPath;
+    private DispatcherTimer? _toastTimer;
+
+    private void FilesToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _filesOpen = !_filesOpen;
+        var to = _filesOpen ? 300.0 : 0.0;
+        var anim = new DoubleAnimation(FilesPanel.ActualWidth, to, new Duration(TimeSpan.FromMilliseconds(180)))
+        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
+        FilesPanel.BeginAnimation(WidthProperty, anim);
+        if (_filesOpen && _client != null)
+            _client.RequestListDir(_currentPath ?? "");
+    }
+
+    private void OnDirListing(string path, List<FsEntry> entries)
+    {
+        _currentPath = path;
+        PathText.Text = string.IsNullOrEmpty(path) ? "This PC" : path;
+        FileList.ItemsSource = entries.Select(en => new FsItem(en)).ToList();
+    }
+
+    private void Up_Click(object sender, RoutedEventArgs e)
+    {
+        if (_client == null || string.IsNullOrEmpty(_currentPath)) return;
+        var parent = Directory.GetParent(_currentPath.TrimEnd('\\', '/'));
+        _client.RequestListDir(parent?.FullName ?? "");
+    }
+
+    private void FileList_DoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (FileList.SelectedItem is not FsItem it || _client == null) return;
+        if (it.Entry.IsDir) _client.RequestListDir(FullPath(it.Entry));
+        else { _client.RequestDownload(FullPath(it.Entry)); ShowToast("Downloading " + it.Entry.Name + "…"); }
+    }
+
+    private void Download_Click(object sender, RoutedEventArgs e)
+    {
+        if (FileList.SelectedItem is not FsItem it || _client == null) return;
+        _client.RequestDownload(FullPath(it.Entry));
+        ShowToast("Downloading " + it.Entry.Name + "…");
+    }
+
+    private string FullPath(FsEntry e) =>
+        string.IsNullOrEmpty(_currentPath) ? e.Name : Path.Combine(_currentPath, e.Name);
+
+    private void ScreenHost_DragEnter(object sender, DragEventArgs e)
+    {
+        if (e.Data.GetDataPresent(DataFormats.FileDrop))
+        {
+            DropHint.Visibility = Visibility.Visible;
+            e.Effects = DragDropEffects.Copy;
+        }
+        else e.Effects = DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private void ScreenHost_DragLeave(object sender, DragEventArgs e) => DropHint.Visibility = Visibility.Collapsed;
+
+    private void ScreenHost_Drop(object sender, DragEventArgs e)
+    {
+        DropHint.Visibility = Visibility.Collapsed;
+        if (_client == null || !e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+        var paths = (string[])e.Data.GetData(DataFormats.FileDrop);
+        if (paths is { Length: > 0 }) { ShowToast("Sending " + paths.Length + " item(s)…"); _ = _client.UploadAsync(paths); }
+    }
+
+    private void ShowToast(string text)
+    {
+        ToastText.Text = text;
+        Toast.Visibility = Visibility.Visible;
+        _toastTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
+        _toastTimer.Stop();
+        _toastTimer.Tick -= HideToast;
+        _toastTimer.Tick += HideToast;
+        _toastTimer.Start();
+    }
+
+    private void HideToast(object? sender, EventArgs e)
+    {
+        _toastTimer?.Stop();
+        Toast.Visibility = Visibility.Collapsed;
+    }
+
+    private sealed class FsItem
+    {
+        public FsEntry Entry { get; }
+        public FsItem(FsEntry e) => Entry = e;
+        public override string ToString() =>
+            Entry.IsDir ? Entry.Name.TrimEnd('\\', '/') + "\\" : Entry.Name + "   " + Human(Entry.Size);
+        private static string Human(long n) =>
+            n >= 1L << 30 ? $"{n / 1024.0 / 1024 / 1024:N1} GB" :
+            n >= 1L << 20 ? $"{n / 1024.0 / 1024:N1} MB" :
+            n >= 1L << 10 ? $"{n / 1024.0:N0} KB" : $"{n} B";
+    }
+
     public void Dispose()
     {
         _closed = true;
         _reconnectTimer.Stop();
+        _toastTimer?.Stop();
         _client?.Dispose();
     }
 }
