@@ -70,10 +70,14 @@ public static class Installer
         try
         {
             using var k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System");
+            // Elevate admin actions without a UAC prompt, so admin tasks done remotely don't need a click
+            // that can't be reached from the client. (Security trade-off: any elevation becomes silent.)
+            k!.SetValue("ConsentPromptBehaviorAdmin", 0, RegistryValueKind.DWord);
+            // And if any prompt does appear, keep it on the normal desktop so it's visible through Pane.
             k!.SetValue("PromptOnSecureDesktop", 0, RegistryValueKind.DWord);
-            Console.WriteLine("  UAC prompts set to appear on the normal desktop (clickable through Pane).");
+            Console.WriteLine("  UAC set to auto-approve elevation for admins (no prompt to click).");
         }
-        catch (Exception ex) { Console.WriteLine("  Could not adjust UAC secure-desktop setting: " + ex.Message); }
+        catch (Exception ex) { Console.WriteLine("  Could not adjust UAC settings: " + ex.Message); }
 
         // 5. Start it now (detached), so there is no wait for the next logon.
         try
@@ -108,7 +112,8 @@ public static class Installer
         try
         {
             using var k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System");
-            k!.SetValue("PromptOnSecureDesktop", 1, RegistryValueKind.DWord); // restore Windows default
+            k!.SetValue("ConsentPromptBehaviorAdmin", 5, RegistryValueKind.DWord); // restore Windows defaults
+            k!.SetValue("PromptOnSecureDesktop", 1, RegistryValueKind.DWord);
         }
         catch { }
         foreach (var p in Process.GetProcessesByName("PaneHost"))

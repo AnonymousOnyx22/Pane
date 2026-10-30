@@ -92,22 +92,25 @@ try
         {
             totalRects++;
             totalCompressed += r.Compressed.Length;
-            int expected = r.W * r.H * 4;
-            var pixels = Inflate(r.Compressed, expected);
-            if (pixels.Length != expected)
+            // Frames are JPEG now: verify the magic bytes (FFD8 ... FFD9).
+            var j = r.Compressed;
+            if (j.Length < 4 || j[0] != 0xFF || j[1] != 0xD8 || j[^2] != 0xFF || j[^1] != 0xD9)
             {
-                Console.WriteLine($"FAIL: rect {r.W}x{r.H} inflated to {pixels.Length}, expected {expected}.");
+                var head = string.Join(" ", j.Take(8).Select(b => b.ToString("X2")));
+                var tail = string.Join(" ", j.Skip(Math.Max(0, j.Length - 8)).Select(b => b.ToString("X2")));
+                Console.WriteLine($"FAIL: rect {r.W}x{r.H} not valid JPEG ({j.Length} bytes). head=[{head}] tail=[{tail}]");
+                File.WriteAllBytes("frame-dump.bin", j);
                 return 1;
             }
-            totalPixels += expected;
+            totalPixels += (long)r.W * r.H * 4;
         }
         if (frames >= 1 && totalRects >= 1) break;
     }
 
     if (frames == 0) { Console.WriteLine("FAIL: no frames received in 8s."); return 1; }
     Console.WriteLine($"PASS: received {frames} frame(s), {totalRects} rect(s), " +
-                      $"{totalCompressed / 1024.0:N0} KiB compressed -> {totalPixels / 1024.0 / 1024.0:N1} MiB pixels " +
-                      $"(decoded cleanly).");
+                      $"{totalCompressed / 1024.0:N0} KiB JPEG -> {totalPixels / 1024.0 / 1024.0:N1} MiB pixels " +
+                      $"(valid JPEG).");
 
     // Benign input: move the pointer to screen center. Proves SendInput path works end to end.
     await channel.SendAsync(Messages.MouseMove(0.5f, 0.5f), timeout);
@@ -145,12 +148,3 @@ catch (Exception ex)
     return 1;
 }
 
-static byte[] Inflate(byte[] data, int expected)
-{
-    using var ms = new MemoryStream(data);
-    using var ds = new DeflateStream(ms, CompressionMode.Decompress);
-    var outBuf = new byte[expected];
-    int off = 0, n;
-    while (off < expected && (n = ds.Read(outBuf, off, expected - off)) > 0) off += n;
-    return outBuf;
-}

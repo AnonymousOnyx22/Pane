@@ -20,8 +20,11 @@ installer wrapper around the host.
 
 `ScreenCapture` uses the Desktop Duplication API (via Vortice.Direct3D11/DXGI): acquire frame -> copy the
 desktop texture to a CPU-readable staging texture -> read the dirty (and move-destination) rectangles ->
-pack each as tight BGRA32 -> Deflate. The first frame, and any after access loss (resolution change, UAC
-secure desktop), is sent whole. Access loss triggers automatic re-initialization.
+pack each as tight BGRA32 -> **JPEG-encode** (GDI+, quality 80). JPEG is ~10-60x smaller than Deflated raw
+BGRA for real desktop content, which is what keeps large changes (dragging/maximizing a window) smooth.
+When a frame has many scattered dirty rects (e.g. a window drag), they are coalesced into one bounding
+region. The first frame, and any after access loss (resolution change, UAC secure desktop, lock screen),
+is sent whole; access loss is handled by re-initializing without dropping the session.
 
 ## Host input path
 

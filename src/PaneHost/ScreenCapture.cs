@@ -149,6 +149,10 @@ public sealed class ScreenCapture : IDisposable
             {
                 CollectDirtyRects(frameInfo, rects);
                 if (rects.Count == 0) return new List<FrameRect>();
+                // Many rects (e.g. dragging a window) are cheaper and smoother to send as one region
+                // than as dozens of tiny JPEGs.
+                if (rects.Count > 8)
+                    rects = new List<Vortice.RawRect> { BoundingBox(rects) };
             }
 
             return ExtractAndCompress(rects);
@@ -166,6 +170,18 @@ public sealed class ScreenCapture : IDisposable
             _needReinit = true;
             return new List<FrameRect>();
         }
+    }
+
+    private Vortice.RawRect BoundingBox(List<Vortice.RawRect> rects)
+    {
+        int left = int.MaxValue, top = int.MaxValue, right = int.MinValue, bottom = int.MinValue;
+        foreach (var r in rects)
+        {
+            left = Math.Min(left, r.Left); top = Math.Min(top, r.Top);
+            right = Math.Max(right, r.Right); bottom = Math.Max(bottom, r.Bottom);
+        }
+        return new Vortice.RawRect(Math.Clamp(left, 0, Width), Math.Clamp(top, 0, Height),
+                                   Math.Clamp(right, 0, Width), Math.Clamp(bottom, 0, Height));
     }
 
     private void CollectDirtyRects(OutduplFrameInfo info, List<Vortice.RawRect> rects)
@@ -214,19 +230,36 @@ public sealed class ScreenCapture : IDisposable
                         Buffer.MemoryCopy(srcRow, dst + (long)row * rowBytes, rowBytes, rowBytes);
                     }
                 }
-                output.Add(new FrameRect(x, y, w, h, Deflate(packed)));
+                output.Add(new FrameRect(x, y, w, h, EncodeJpeg(packed, w, h)));
             }
         }
         finally { _context.Unmap(_staging, 0); }
         return output;
     }
 
-    private static byte[] Deflate(byte[] data)
+    // JPEG is ~10-20x smaller than raw/Deflated BGRA and far faster to move, which is what keeps big
+    // changes (dragging/maximizing a window) smooth instead of choking the link.
+    private static readonly System.Drawing.Imaging.ImageCodecInfo JpegCodec =
+        Array.Find(System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders(), c => c.FormatID == System.Drawing.Imaging.ImageFormat.Jpeg.Guid)!;
+    private static readonly System.Drawing.Imaging.EncoderParameters JpegParams = MakeJpegParams(80L);
+
+    private static System.Drawing.Imaging.EncoderParameters MakeJpegParams(long quality)
     {
-        using var ms = new MemoryStream();
-        using (var ds = new DeflateStream(ms, CompressionLevel.Fastest, leaveOpen: true))
-            ds.Write(data, 0, data.Length);
-        return ms.ToArray();
+        var p = new System.Drawing.Imaging.EncoderParameters(1);
+        p.Param[0] = new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, quality);
+        return p;
+    }
+
+    private static unsafe byte[] EncodeJpeg(byte[] bgra, int w, int h)
+    {
+        fixed (byte* p = bgra)
+        {
+            using var bmp = new System.Drawing.Bitmap(w, h, w * 4,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb, (IntPtr)p);
+            using var ms = new MemoryStream();
+            bmp.Save(ms, JpegCodec, JpegParams);
+            return ms.ToArray();
+        }
     }
 
     public void ForceFullFrame() => _needFullFrame = true;

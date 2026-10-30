@@ -61,22 +61,20 @@ public partial class RemoteView : UserControl, IDisposable
         foreach (var r in rects)
         {
             if (r.W <= 0 || r.H <= 0) continue;
-            byte[] pixels = Inflate(r.Compressed, r.W * r.H * 4);
-            int stride = r.W * 4;
-            var rect = new Int32Rect(r.X, r.Y, r.W, r.H);
-            if (r.X + r.W <= _w && r.Y + r.H <= _h)
-                _bmp.WritePixels(rect, pixels, stride, 0);
+            if (r.X + r.W > _w || r.Y + r.H > _h) continue;
+            try
+            {
+                BitmapSource src = BitmapFrame.Create(new MemoryStream(r.Compressed),
+                    BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+                if (src.Format != PixelFormats.Bgra32)
+                    src = new FormatConvertedBitmap(src, PixelFormats.Bgra32, null, 0);
+                int stride = r.W * 4;
+                var pixels = new byte[stride * r.H];
+                src.CopyPixels(pixels, stride, 0);
+                _bmp.WritePixels(new Int32Rect(r.X, r.Y, r.W, r.H), pixels, stride, 0);
+            }
+            catch { /* skip a corrupt rect; the next full frame heals it */ }
         }
-    }
-
-    private static byte[] Inflate(byte[] data, int expected)
-    {
-        using var ms = new MemoryStream(data);
-        using var ds = new DeflateStream(ms, CompressionMode.Decompress);
-        var outBuf = new byte[expected];
-        int off = 0, n;
-        while (off < expected && (n = ds.Read(outBuf, off, expected - off)) > 0) off += n;
-        return outBuf;
     }
 
     // --- status overlay ---

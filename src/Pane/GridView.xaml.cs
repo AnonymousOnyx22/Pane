@@ -148,18 +148,27 @@ public partial class GridView : UserControl
             Width = 8,
             Height = 8,
             VerticalAlignment = VerticalAlignment.Center,
-            Fill = pc.Online ? (Brush)FindResource("Fg") : (Brush)FindResource("DotOffline")
+            Fill = pc.Online ? (Brush)FindResource("DotOnline") : (Brush)FindResource("DotOffline")
         };
         if (pc.Online)
-            dot.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0.35,
-                new Duration(TimeSpan.FromMilliseconds(1100)))
+        {
+            dot.Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                Color = (Color)ColorConverter.ConvertFromString("#32D74B"),
+                BlurRadius = 10,
+                ShadowDepth = 0,
+                Opacity = 0.9
+            };
+            dot.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0.4,
+                new Duration(TimeSpan.FromMilliseconds(950)))
             { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever, EasingFunction = EaseOut });
+        }
         var status = new TextBlock
         {
             Text = pc.StatusText,
             FontSize = 12,
             Margin = new Thickness(7, 0, 0, 0),
-            Foreground = (Brush)FindResource("FgDim"),
+            Foreground = pc.Online ? (Brush)FindResource("DotOnline") : (Brush)FindResource("FgDim"),
             VerticalAlignment = VerticalAlignment.Center
         };
         statusRow.Children.Add(dot);
