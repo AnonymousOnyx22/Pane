@@ -7,6 +7,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using Pane.Protocol;
 
 namespace Pane;
@@ -20,11 +21,15 @@ public partial class RemoteView : UserControl, IDisposable
     private int _w, _h;
     private readonly Stopwatch _moveClock = Stopwatch.StartNew();
     private long _lastMoveSentMs = -100;
+    private bool _closed;
+    private readonly DispatcherTimer _reconnectTimer;
 
     public RemoteView(SavedPc pc)
     {
         InitializeComponent();
         _pc = pc;
+        _reconnectTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+        _reconnectTimer.Tick += (_, __) => { _reconnectTimer.Stop(); if (!_closed) Connect(); };
         Loaded += (_, __) => { Focus(); Keyboard.Focus(this); };
         WireInput();
         Connect();
@@ -32,6 +37,7 @@ public partial class RemoteView : UserControl, IDisposable
 
     private void Connect()
     {
+        if (_closed) return;
         ShowStatus("Connecting...", false);
         if (!Protocol.PairingKey.TryDecode(_pc.Key, out var key))
         {
@@ -39,11 +45,21 @@ public partial class RemoteView : UserControl, IDisposable
             return;
         }
 
+        _client?.Dispose();
         _client = new RemoteClient();
         _client.Connected += (w, h) => Dispatcher.Invoke(() => OnConnected(w, h));
         _client.FrameReceived += rects => Dispatcher.Invoke(() => OnFrame(rects));
-        _client.Disconnected += reason => Dispatcher.Invoke(() => ShowStatus(reason, true));
+        _client.Disconnected += reason => Dispatcher.Invoke(() => OnDisconnected(reason));
         _client.Start(string.IsNullOrWhiteSpace(_pc.Host) ? _pc.Id : _pc.Host, Net.TcpPort, key);
+    }
+
+    private void OnDisconnected(string reason)
+    {
+        if (_closed) return;
+        // Auto-reconnect: keep retrying every 2s. The manual button is still there as a nudge.
+        ShowStatus("Connection lost — reconnecting…", true);
+        _reconnectTimer.Stop();
+        _reconnectTimer.Start();
     }
 
     private void OnConnected(int w, int h)
@@ -88,8 +104,7 @@ public partial class RemoteView : UserControl, IDisposable
 
     private void Retry_Click(object sender, RoutedEventArgs e)
     {
-        _client?.Dispose();
-        _client = null;
+        _reconnectTimer.Stop();
         Connect();
     }
 
@@ -152,6 +167,9 @@ public partial class RemoteView : UserControl, IDisposable
         _ => 2
     };
 
+    /// <summary>Called by the global keyboard hook to forward a raw key (incl. Win, Alt+Tab) to the host.</summary>
+    public void ForwardKey(ushort vk, bool down, bool extended) => _client?.SendKey(vk, down, extended);
+
     private bool SendKey(KeyEventArgs e, bool down)
     {
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
@@ -170,5 +188,10 @@ public partial class RemoteView : UserControl, IDisposable
         _ => false
     };
 
-    public void Dispose() => _client?.Dispose();
+    public void Dispose()
+    {
+        _closed = true;
+        _reconnectTimer.Stop();
+        _client?.Dispose();
+    }
 }

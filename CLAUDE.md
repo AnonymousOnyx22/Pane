@@ -28,4 +28,8 @@ without built-in Remote Desktop. Encrypted, pairing-key gated, LAN auto-discover
 - Don't commit dist/ or src/PaneHostSetup/embed/*.exe (generated). Never commit a real pairing key.
 
 ## Status
-- Working end to end on loopback (handshake, frames, input, wrong-key rejection all pass). Primary monitor only.
+- Working end to end on loopback: handshake, JPEG frames, input, wrong-key rejection, 5s mouse soak all pass.
+- Frames are JPEG (protocol v2). Client auto-reconnects. Global keyboard hook forwards Win/Alt+Tab to the
+  remote while a session tab is foreground (mouse is the escape hatch). Host is headless; setup is windowless
+  and shows the key in a dialog; installer sets UAC to auto-approve admin elevation. Primary monitor only.
+- Not yet field-tested on the two-PC setup with the v2 host (needs a one-time physical reinstall there).

@@ -1,15 +1,11 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 
-// One-click installer for Pane Host. It carries the host exe as an embedded resource, extracts it to
-// a temp folder, and runs it with --install (copy to ProgramData, register the logon task, open the
-// firewall, start it, print the pairing key). This process is elevated via its manifest, so the host
-// install step inherits administrator rights.
-
-Console.Title = "Pane Host Setup";
-Console.WriteLine("Pane Host Setup");
-Console.WriteLine("===============");
-Console.WriteLine();
+// One-click installer for Pane Host. Windowless: it extracts the embedded host, runs it with --install
+// (copy to ProgramData, register the logon task, open the firewall, set UAC auto-approve, start it),
+// then shows the pairing key in a dialog. No console window appears at all.
 
 try
 {
@@ -17,37 +13,57 @@ try
     using var res = asm.GetManifestResourceStream("PaneHost.exe");
     if (res == null)
     {
-        Console.WriteLine("ERROR: this setup build does not contain the host payload.");
-        Console.WriteLine("Rebuild with scripts/build.ps1, which stages the host before publishing the setup.");
-        return Pause(1);
+        Msg("This setup build is missing the host payload.\nRebuild with scripts/build.ps1.", "Pane Host Setup");
+        return 1;
     }
 
     var dir = Path.Combine(Path.GetTempPath(), "PaneSetup");
     Directory.CreateDirectory(dir);
     var hostPath = Path.Combine(dir, "PaneHost.exe");
-    using (var fs = File.Create(hostPath))
-        res.CopyTo(fs);
+    using (var fs = File.Create(hostPath)) res.CopyTo(fs);
 
-    Console.WriteLine("Running install...");
-    Console.WriteLine();
-
-    var psi = new ProcessStartInfo(hostPath, "--install") { UseShellExecute = false };
+    var psi = new ProcessStartInfo(hostPath, "--install")
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+    };
     using var p = Process.Start(psi)!;
+    string output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
     p.WaitForExit();
 
-    Console.WriteLine();
-    return Pause(p.ExitCode);
+    // Read the pairing key straight from the host's config (reliable regardless of console capture).
+    string key = "(run PaneHost.exe --key to see it)";
+    try
+    {
+        var cfg = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                               "PaneHost", "config.json");
+        var m = Regex.Match(File.ReadAllText(cfg), "\"PairingKey\"\\s*:\\s*\"([^\"]+)\"");
+        if (m.Success) key = m.Groups[1].Value;
+    }
+    catch { }
+
+    if (p.ExitCode == 0)
+        Msg($"Pane Host is installed and running on {Environment.MachineName}.\n\n" +
+            $"Pairing key:\n{key}\n\n" +
+            "Enter this key in Pane on your other PC to connect.\n" +
+            "(Tip: press Ctrl+C to copy this message.)", "Pane Host — Installed");
+    else
+        Msg("The install reported a problem:\n\n" + output, "Pane Host Setup");
+
+    return p.ExitCode;
 }
 catch (Exception ex)
 {
-    Console.WriteLine("Install failed: " + ex.Message);
-    return Pause(1);
+    Msg("Install failed:\n\n" + ex.Message, "Pane Host Setup");
+    return 1;
 }
 
-static int Pause(int code)
+static void Msg(string text, string caption) => Native.MessageBoxW(IntPtr.Zero, text, caption, 0x40);
+
+static class Native
 {
-    Console.WriteLine();
-    Console.WriteLine("Press any key to close...");
-    try { Console.ReadKey(true); } catch { }
-    return code;
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
 }

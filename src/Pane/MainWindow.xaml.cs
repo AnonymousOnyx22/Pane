@@ -30,6 +30,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly Dictionary<string, DateTime> _lastSeen = new(); // key: host guid or ip
     private readonly DiscoveryListener _discovery = new();
     private readonly DispatcherTimer _presenceTimer;
+    private readonly KeyboardHook _kbHook = new();
 
     public MainWindow()
     {
@@ -60,7 +61,26 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _presenceTimer.Tick += PrunePresence;
         _presenceTimer.Start();
 
-        Closed += (_, __) => { _discovery.Dispose(); foreach (var t in Tabs) (t.Content as IDisposable)?.Dispose(); };
+        Closed += (_, __) =>
+        {
+            _kbHook.Dispose();
+            _discovery.Dispose();
+            foreach (var t in Tabs) (t.Content as IDisposable)?.Dispose();
+        };
+
+        _kbHook.OnKey = OnHookKey;
+        try { _kbHook.Install(); } catch { /* fall back to WPF key handling */ }
+    }
+
+    /// <summary>
+    /// Forward a key to the active remote session (and suppress it locally) only when Pane is the
+    /// foreground window and a remote tab is active. Otherwise let the OS handle it normally.
+    /// </summary>
+    private bool OnHookKey(uint vk, bool down, bool extended)
+    {
+        if (!IsActive) return false;
+        if (SelectedContent is RemoteView rv) { rv.ForwardKey((ushort)vk, down, extended); return true; }
+        return false;
     }
 
     private void UpdateClip()

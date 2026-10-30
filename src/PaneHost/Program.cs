@@ -21,9 +21,13 @@ if (args.Contains("--install") || args.Contains("--uninstall") || args.Contains(
 
 static void EnsureConsole()
 {
+    // If stdout is already a pipe/file (the GUI setup captures it) writes go there — do nothing.
+    if (Console.IsOutputRedirected) return;
+    // If we already inherited a console from a console parent, use it (no new window).
+    if (ConsoleNative.GetConsoleWindow() != IntPtr.Zero) return;
+    // Otherwise attach to the launching terminal, or make one only if there truly is none.
     if (!ConsoleNative.AttachConsole(-1)) ConsoleNative.AllocConsole(); // -1 = ATTACH_PARENT_PROCESS
-    var stdout = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
-    Console.SetOut(stdout);
+    Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
 }
 
 // Single instance guard.
@@ -82,4 +86,5 @@ static class ConsoleNative
 {
     [DllImport("kernel32.dll", SetLastError = true)] public static extern bool AttachConsole(int dwProcessId);
     [DllImport("kernel32.dll", SetLastError = true)] public static extern bool AllocConsole();
+    [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
 }
