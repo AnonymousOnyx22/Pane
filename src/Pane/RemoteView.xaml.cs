@@ -182,6 +182,40 @@ public partial class RemoteView : UserControl, IDisposable
         _ => false
     };
 
+    // --- stats overlay ---
+
+    private DispatcherTimer? _statsTimer;
+    private bool _statsOn;
+    private long _lastFrames, _lastBytes;
+    private DateTime _lastStat = DateTime.UtcNow;
+
+    private void StatsToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _statsOn = !_statsOn;
+        StatsText.Visibility = _statsOn ? Visibility.Visible : Visibility.Collapsed;
+        StatsToggle.Opacity = _statsOn ? 1.0 : 0.6;
+        if (_statsOn && _statsTimer == null)
+        {
+            _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            _statsTimer.Tick += StatsTick;
+            _statsTimer.Start();
+        }
+    }
+
+    private void StatsTick(object? sender, EventArgs e)
+    {
+        if (!_statsOn || _client == null) return;
+        long f = _client.TotalFrames, b = _client.TotalBytes;
+        double dt = (DateTime.UtcNow - _lastStat).TotalSeconds;
+        if (dt > 0)
+        {
+            double fps = (f - _lastFrames) / dt;
+            double kbs = (b - _lastBytes) / 1024.0 / dt;
+            StatsText.Text = $"{fps:N0} fps  ·  {kbs:N0} KB/s";
+        }
+        _lastFrames = f; _lastBytes = b; _lastStat = DateTime.UtcNow;
+    }
+
     // --- file transfer UI ---
 
     private bool _filesOpen;
@@ -285,6 +319,7 @@ public partial class RemoteView : UserControl, IDisposable
         _closed = true;
         _reconnectTimer.Stop();
         _toastTimer?.Stop();
+        _statsTimer?.Stop();
         _client?.Dispose();
     }
 }

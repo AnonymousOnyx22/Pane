@@ -39,6 +39,10 @@ public sealed class RemoteClient : IDisposable
     private FileStream? _dlStream;
     private int _dlFiles;
 
+    private long _frames, _bytes;
+    public long TotalFrames => Interlocked.Read(ref _frames);
+    public long TotalBytes => Interlocked.Read(ref _bytes);
+
     public async void Start(string host, int port, byte[] key)
     {
         try
@@ -73,6 +77,8 @@ public sealed class RemoteClient : IDisposable
                 {
                     // Decode JPEG here on the receive thread. Only the cheap WritePixels then runs on the UI
                     // thread, so WPF's compositor stays free to animate at 60fps instead of being saturated.
+                    Interlocked.Increment(ref _frames);
+                    Interlocked.Add(ref _bytes, msg.Length);
                     var rects = Messages.ReadFrame(msg);
                     var decoded = new List<DecodedRect>(rects.Count);
                     foreach (var r in rects)
