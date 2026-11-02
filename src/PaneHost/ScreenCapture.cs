@@ -1,4 +1,3 @@
-using System.IO.Compression;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
@@ -6,9 +5,12 @@ using Pane.Protocol;
 
 namespace PaneHost;
 
+/// <summary>A changed region captured as raw BGRA32 (stride = W*4), awaiting JPEG encoding.</summary>
+public readonly record struct RawTile(int X, int Y, int W, int H, byte[] Bgra, bool Large);
+
 /// <summary>
-/// Captures the primary monitor with the Desktop Duplication API and returns only the changed
-/// rectangles, each as Deflate-compressed BGRA32. Rebuilds the duplication object automatically when
+/// Captures the primary monitor with the Desktop Duplication API and returns only the changed regions
+/// as raw BGRA tiles (encoded to JPEG by the caller). Rebuilds the duplication object automatically when
 /// access is lost (resolution change, UAC/secure desktop, session switch).
 /// </summary>
 public sealed class ScreenCapture : IDisposable
@@ -91,11 +93,11 @@ public sealed class ScreenCapture : IDisposable
     }
 
     /// <summary>
-    /// Waits up to <paramref name="timeoutMs"/> for a new frame. Returns the changed rectangles, or an
-    /// empty list if nothing pixel-changed within the timeout. Throws only on unexpected failures;
-    /// recoverable access loss is handled internally by re-initializing.
+    /// Waits up to <paramref name="timeoutMs"/> for a new frame and returns the changed regions as raw
+    /// BGRA tiles (not yet JPEG-encoded, so the caller can encode on a worker thread while this captures
+    /// the next frame). Empty if nothing changed. Recoverable access loss is handled by re-initializing.
     /// </summary>
-    public List<FrameRect> Capture(int timeoutMs)
+    public List<RawTile> CaptureRaw(int timeoutMs)
     {
         // Rebuild the duplication after a desktop switch (UAC secure desktop, lock screen, resolution
         // change, session reconnect). While the secure desktop is up, DuplicateOutput keeps failing, so we
@@ -108,7 +110,7 @@ public sealed class ScreenCapture : IDisposable
             {
                 if (!_loggedLost) { Log.Info("Display unavailable (UAC/secure desktop or switch); waiting to resume..."); _loggedLost = true; }
                 Thread.Sleep(150);
-                return new List<FrameRect>();
+                return new List<RawTile>();
             }
             Log.Info("Display reacquired; resuming capture.");
         }
@@ -117,11 +119,11 @@ public sealed class ScreenCapture : IDisposable
         {
         var result = _dupl.AcquireNextFrame((uint)timeoutMs, out var frameInfo, out var desktopResource);
         if (result == Vortice.DXGI.ResultCode.WaitTimeout)
-            return new List<FrameRect>();
+            return new List<RawTile>();
         if (result == Vortice.DXGI.ResultCode.AccessLost)
         {
             _needReinit = true;
-            return new List<FrameRect>();
+            return new List<RawTile>();
         }
         result.CheckError();
 
@@ -132,9 +134,9 @@ public sealed class ScreenCapture : IDisposable
             // new to send, so skip it. Without this guard, dereferencing the resource threw NullReference.
             bool hasNewImage = desktopResource != null && frameInfo.LastPresentTime != 0;
             if (!hasNewImage && !_needFullFrame)
-                return new List<FrameRect>();
+                return new List<RawTile>();
             if (desktopResource == null)
-                return new List<FrameRect>();
+                return new List<RawTile>();
 
             using var tex = desktopResource.QueryInterface<ID3D11Texture2D>();
             _context.CopyResource(_staging, tex);
@@ -148,14 +150,14 @@ public sealed class ScreenCapture : IDisposable
             else
             {
                 CollectDirtyRects(frameInfo, rects);
-                if (rects.Count == 0) return new List<FrameRect>();
+                if (rects.Count == 0) return new List<RawTile>();
                 // Many rects (e.g. dragging a window) are cheaper and smoother to send as one region
                 // than as dozens of tiny JPEGs.
                 if (rects.Count > 8)
                     rects = new List<Vortice.RawRect> { BoundingBox(rects) };
             }
 
-            return ExtractAndCompress(rects);
+            return ExtractRaw(rects);
         }
         finally
         {
@@ -168,7 +170,7 @@ public sealed class ScreenCapture : IDisposable
             // Any device/duplication failure (device removed, desktop switch mid-call): rebuild next time
             // instead of killing the session.
             _needReinit = true;
-            return new List<FrameRect>();
+            return new List<RawTile>();
         }
     }
 
@@ -204,9 +206,9 @@ public sealed class ScreenCapture : IDisposable
             rects.Add(dirtyBuf[i]);
     }
 
-    private unsafe List<FrameRect> ExtractAndCompress(List<Vortice.RawRect> rects)
+    private unsafe List<RawTile> ExtractRaw(List<Vortice.RawRect> rects)
     {
-        var output = new List<FrameRect>(rects.Count);
+        var output = new List<RawTile>(rects.Count);
         var map = _context.Map(_staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
         try
         {
@@ -230,14 +232,22 @@ public sealed class ScreenCapture : IDisposable
                         Buffer.MemoryCopy(srcRow, dst + (long)row * rowBytes, rowBytes, rowBytes);
                     }
                 }
-                // Big (moving) regions: lower quality = faster encode + smaller = smoother. Small
-                // (static detail) regions: high quality for crisp text.
-                var qual = (long)w * h > (long)Width * Height / 4 ? JpegLow : JpegHigh;
-                output.Add(new FrameRect(x, y, w, h, EncodeJpeg(packed, w, h, qual)));
+                // Big (moving) regions encode at lower quality (faster + smaller); flag that here so the
+                // worker thread can pick the quality. Copied out of the GPU map, so the staging texture is
+                // free for the next capture the moment Unmap returns.
+                bool large = (long)w * h > (long)Width * Height / 4;
+                output.Add(new RawTile(x, y, w, h, packed, large));
             }
         }
         finally { _context.Unmap(_staging, 0); }
         return output;
+    }
+
+    /// <summary>JPEG-encode one raw tile. Pure/CPU-only, so it can run on a worker thread.</summary>
+    public static FrameRect Encode(RawTile t)
+    {
+        var qual = t.Large ? JpegLow : JpegHigh;
+        return new FrameRect(t.X, t.Y, t.W, t.H, EncodeJpeg(t.Bgra, t.W, t.H, qual));
     }
 
     // JPEG is ~10-20x smaller than raw/Deflated BGRA and far faster to move, which is what keeps big

@@ -59,22 +59,32 @@ public sealed class Session : IDisposable
 
     private static async Task CaptureLoop(SecureChannel channel, ScreenCapture capture, CancellationToken ct)
     {
-        // AcquireNextFrame blocks until the next presented frame (or the timeout), so it paces the loop to
-        // the monitor's own refresh. An extra Task.Delay only adds latency, so there isn't one — this keeps
-        // motion as smooth as the link allows.
+        // Pipelined: the GPU captures/extracts the next frame on this thread while a worker JPEG-encodes
+        // and sends the previous one, so encode+network time is overlapped with capture instead of serial.
+        // AcquireNextFrame paces to the monitor's refresh; sends are awaited in order for correctness.
+        Task sending = Task.CompletedTask;
         while (!ct.IsCancellationRequested)
         {
-            List<FrameRect> rects;
-            try { rects = capture.Capture(200); }
+            List<RawTile> raw;
+            try { raw = capture.CaptureRaw(200); }
             catch (Exception ex)
             {
                 if (!ct.IsCancellationRequested) Log.Info($"Capture error: {ex.Message}");
                 break;
             }
+            if (raw.Count == 0) continue;
 
-            if (rects.Count > 0)
+            try { await sending; }
+            catch (OperationCanceledException) { break; }
+            catch { break; }
+
+            sending = Task.Run(async () =>
+            {
+                var rects = raw.Select(ScreenCapture.Encode).ToList();
                 await channel.SendAsync(Messages.Frame(rects), ct);
+            }, ct);
         }
+        try { await sending; } catch { }
     }
 
     private static async Task InputLoop(SecureChannel channel, InputInjector injector, ScreenCapture capture, FileService files, CancellationToken ct)
