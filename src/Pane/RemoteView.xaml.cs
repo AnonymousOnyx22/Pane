@@ -50,7 +50,7 @@ public partial class RemoteView : UserControl, IDisposable
         _client?.Dispose();
         _client = new RemoteClient();
         _client.Connected += (w, h) => Dispatcher.Invoke(() => OnConnected(w, h));
-        _client.FrameReceived += rects => Dispatcher.Invoke(() => OnFrame(rects));
+        _client.FrameDecoded += rects => Dispatcher.Invoke(() => OnFrame(rects));
         _client.Disconnected += reason => Dispatcher.Invoke(() => OnDisconnected(reason));
         _client.DirListing += (path, entries) => Dispatcher.Invoke(() => OnDirListing(path, entries));
         _client.TransferStatus += s => Dispatcher.Invoke(() => ShowToast(s));
@@ -75,25 +75,15 @@ public partial class RemoteView : UserControl, IDisposable
         Focus();
     }
 
-    private void OnFrame(System.Collections.Generic.List<FrameRect> rects)
+    private void OnFrame(List<DecodedRect> rects)
     {
         if (_bmp == null) return;
+        // Pixels are already decoded off-thread; this is just a fast memcpy into the bitmap.
         foreach (var r in rects)
         {
-            if (r.W <= 0 || r.H <= 0) continue;
             if (r.X + r.W > _w || r.Y + r.H > _h) continue;
-            try
-            {
-                BitmapSource src = BitmapFrame.Create(new MemoryStream(r.Compressed),
-                    BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
-                if (src.Format != PixelFormats.Bgra32)
-                    src = new FormatConvertedBitmap(src, PixelFormats.Bgra32, null, 0);
-                int stride = r.W * 4;
-                var pixels = new byte[stride * r.H];
-                src.CopyPixels(pixels, stride, 0);
-                _bmp.WritePixels(new Int32Rect(r.X, r.Y, r.W, r.H), pixels, stride, 0);
-            }
-            catch { /* skip a corrupt rect; the next full frame heals it */ }
+            try { _bmp.WritePixels(new Int32Rect(r.X, r.Y, r.W, r.H), r.Bgra, r.Stride, 0); }
+            catch { /* next full frame heals it */ }
         }
     }
 

@@ -230,7 +230,10 @@ public sealed class ScreenCapture : IDisposable
                         Buffer.MemoryCopy(srcRow, dst + (long)row * rowBytes, rowBytes, rowBytes);
                     }
                 }
-                output.Add(new FrameRect(x, y, w, h, EncodeJpeg(packed, w, h)));
+                // Big (moving) regions: lower quality = faster encode + smaller = smoother. Small
+                // (static detail) regions: high quality for crisp text.
+                var qual = (long)w * h > (long)Width * Height / 4 ? JpegLow : JpegHigh;
+                output.Add(new FrameRect(x, y, w, h, EncodeJpeg(packed, w, h, qual)));
             }
         }
         finally { _context.Unmap(_staging, 0); }
@@ -241,7 +244,8 @@ public sealed class ScreenCapture : IDisposable
     // changes (dragging/maximizing a window) smooth instead of choking the link.
     private static readonly System.Drawing.Imaging.ImageCodecInfo JpegCodec =
         Array.Find(System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders(), c => c.FormatID == System.Drawing.Imaging.ImageFormat.Jpeg.Guid)!;
-    private static readonly System.Drawing.Imaging.EncoderParameters JpegParams = MakeJpegParams(80L);
+    private static readonly System.Drawing.Imaging.EncoderParameters JpegHigh = MakeJpegParams(88L);
+    private static readonly System.Drawing.Imaging.EncoderParameters JpegLow = MakeJpegParams(60L);
 
     private static System.Drawing.Imaging.EncoderParameters MakeJpegParams(long quality)
     {
@@ -250,14 +254,14 @@ public sealed class ScreenCapture : IDisposable
         return p;
     }
 
-    private static unsafe byte[] EncodeJpeg(byte[] bgra, int w, int h)
+    private static unsafe byte[] EncodeJpeg(byte[] bgra, int w, int h, System.Drawing.Imaging.EncoderParameters qual)
     {
         fixed (byte* p = bgra)
         {
             using var bmp = new System.Drawing.Bitmap(w, h, w * 4,
                 System.Drawing.Imaging.PixelFormat.Format32bppArgb, (IntPtr)p);
             using var ms = new MemoryStream();
-            bmp.Save(ms, JpegCodec, JpegParams);
+            bmp.Save(ms, JpegCodec, qual);
             return ms.ToArray();
         }
     }

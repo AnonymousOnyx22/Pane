@@ -4,9 +4,14 @@ using System.IO;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using Pane.Protocol;
 
 namespace Pane;
+
+/// <summary>A decoded screen rectangle: BGRA32 pixels ready to blit at (X,Y).</summary>
+public readonly record struct DecodedRect(int X, int Y, int W, int H, byte[] Bgra, int Stride);
 
 /// <summary>
 /// Client side of one remote session: connects, authenticates with the pairing key, receives frames,
@@ -16,7 +21,7 @@ namespace Pane;
 public sealed class RemoteClient : IDisposable
 {
     public event Action<int, int>? Connected;              // screen width, height
-    public event Action<List<FrameRect>>? FrameReceived;
+    public event Action<List<DecodedRect>>? FrameDecoded;  // pixels decoded OFF the UI thread
     public event Action<string>? Disconnected;             // reason
 
     public event Action<string, List<FsEntry>>? DirListing; // path, entries
@@ -65,8 +70,19 @@ public sealed class RemoteClient : IDisposable
         switch (Messages.TypeOf(msg))
         {
             case MsgType.Frame:
-                FrameReceived?.Invoke(Messages.ReadFrame(msg));
-                break;
+                {
+                    // Decode JPEG here on the receive thread. Only the cheap WritePixels then runs on the UI
+                    // thread, so WPF's compositor stays free to animate at 60fps instead of being saturated.
+                    var rects = Messages.ReadFrame(msg);
+                    var decoded = new List<DecodedRect>(rects.Count);
+                    foreach (var r in rects)
+                    {
+                        var d = Decode(r);
+                        if (d.HasValue) decoded.Add(d.Value);
+                    }
+                    if (decoded.Count > 0) FrameDecoded?.Invoke(decoded);
+                    break;
+                }
             case MsgType.DirListing:
                 { var (path, entries) = Fs.ReadListing(msg); DirListing?.Invoke(path, entries); break; }
             case MsgType.FileBegin:
@@ -80,6 +96,23 @@ public sealed class RemoteClient : IDisposable
             case MsgType.FsError:
                 TransferStatus?.Invoke("Transfer error: " + Fs.ReadError(msg)); break;
         }
+    }
+
+    private static DecodedRect? Decode(FrameRect r)
+    {
+        if (r.W <= 0 || r.H <= 0) return null;
+        try
+        {
+            BitmapSource src = BitmapFrame.Create(new MemoryStream(r.Compressed),
+                BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+            if (src.Format != PixelFormats.Bgra32)
+                src = new FormatConvertedBitmap(src, PixelFormats.Bgra32, null, 0);
+            int stride = r.W * 4;
+            var px = new byte[stride * r.H];
+            src.CopyPixels(px, stride, 0);
+            return new DecodedRect(r.X, r.Y, r.W, r.H, px, stride);
+        }
+        catch { return null; }
     }
 
     private void BeginDownloadFile(byte[] msg)
