@@ -25,6 +25,9 @@ public enum MsgType : byte
     UploadBegin = 42,   // string relPath, long size
     UploadChunk = 43,   // raw bytes (remainder of message)
     UploadEnd = 44,     // (none)
+    // Handoff (push a project + its Claude session to the other PC and open it there)
+    HandoffFile = 46,   // string relPathFromUserProfile, long size  (then UploadChunk* / UploadEnd)
+    HandoffFinish = 47, // string relFolderFromUserProfile  -> host opens VS Code on it
 
     // File transfer, Host -> Client
     DirListing = 60,    // string path, int count, then {string name, byte isDir, long size}

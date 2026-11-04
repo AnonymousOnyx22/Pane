@@ -109,6 +109,48 @@ public sealed class FileService
 
     public void UploadEnd() => CloseUpload();
 
+    // --- handoff ---
+
+    /// <summary>Begin a handoff file, written under THIS PC's user profile at the given relative path.</summary>
+    public void HandoffFile(string relFromProfile, long size)
+    {
+        CloseUpload();
+        try
+        {
+            var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var dest = Path.Combine(profile, Sanitize(relFromProfile));
+            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+            _upload = File.Create(dest);
+        }
+        catch (Exception ex) { Log.Info($"Handoff file failed: {ex.Message}"); _upload = null; }
+    }
+
+    /// <summary>All handoff files received: open VS Code on the handed-off folder (rebased to this profile).</summary>
+    public void HandoffFinish(string relFolderFromProfile)
+    {
+        CloseUpload();
+        try
+        {
+            var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var folder = Path.Combine(profile, Sanitize(relFolderFromProfile));
+            LaunchVsCode(folder);
+            Log.Info($"Handoff complete -> opened VS Code on {folder}");
+        }
+        catch (Exception ex) { Log.Info($"Handoff finish failed: {ex.Message}"); }
+    }
+
+    private static void LaunchVsCode(string folder)
+    {
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var userCmd = Path.Combine(local, "Programs", "Microsoft VS Code", "bin", "code.cmd");
+        var sysCmd = @"C:\Program Files\Microsoft VS Code\bin\code.cmd";
+        string args = File.Exists(userCmd) ? $"/c \"\"{userCmd}\" \"{folder}\"\""
+                    : File.Exists(sysCmd) ? $"/c \"\"{sysCmd}\" \"{folder}\"\""
+                    : $"/c code \"{folder}\""; // fall back to PATH
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", args)
+        { UseShellExecute = false, CreateNoWindow = true });
+    }
+
     private void CloseUpload() { try { _upload?.Dispose(); } catch { } _upload = null; }
 
     private async Task Err(string msg) { try { await _channel.SendAsync(Fs.FsError(msg), _ct); } catch { } }

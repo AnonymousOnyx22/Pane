@@ -182,6 +182,31 @@ public partial class RemoteView : UserControl, IDisposable
         _ => false
     };
 
+    // --- handoff ---
+
+    private void Handoff_Click(object sender, RoutedEventArgs e) => HandoffPick();
+
+    /// <summary>Show a folder picker and hand off the chosen project. Used by the button and the drag fallback.</summary>
+    public void HandoffPick()
+    {
+        var dlg = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "Pick a project to hand off to the other PC",
+            InitialDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "Projects")
+        };
+        if (dlg.ShowDialog() == true)
+            BeginHandoff(dlg.FolderName);
+    }
+
+    /// <summary>Start a handoff of <paramref name="folder"/> to this session's PC.</summary>
+    public void BeginHandoff(string folder)
+    {
+        if (_client == null || string.IsNullOrEmpty(folder)) return;
+        ShowToast("Handing off " + Path.GetFileName(folder.TrimEnd('\\', '/')) + "…");
+        _ = _client.HandoffAsync(folder);
+    }
+
     // --- stats overlay ---
 
     private DispatcherTimer? _statsTimer;

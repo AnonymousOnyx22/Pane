@@ -117,6 +117,10 @@ public sealed class Session : IDisposable
                     files.UploadChunk(Fs.ReadChunk(msg)); break;
                 case MsgType.UploadEnd:
                     files.UploadEnd(); break;
+                case MsgType.HandoffFile:
+                    { var (rel, sz) = Fs.ReadBegin(msg); files.HandoffFile(rel, sz); break; }
+                case MsgType.HandoffFinish:
+                    files.HandoffFinish(Fs.ReadPath(msg)); break;
             }
         }
     }

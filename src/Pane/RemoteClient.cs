@@ -201,6 +201,85 @@ public sealed class RemoteClient : IDisposable
         await ch.SendAsync(Fs.UploadEnd(), _cts.Token);
     }
 
+    // --- handoff ---
+
+    private static readonly HashSet<string> HandoffSkip =
+        new(StringComparer.OrdinalIgnoreCase) { "node_modules", "bin", "obj", ".vs", "dist", "build", "__pycache__" };
+
+    /// <summary>
+    /// Hand the project off to the other PC: push the folder (rebased to each PC's user profile) and its
+    /// Claude Code session, then open VS Code on it there. Runs on a background task.
+    /// </summary>
+    public Task HandoffAsync(string localFolder) => Task.Run(async () =>
+    {
+        var ch = _channel;
+        if (ch == null) return;
+        try
+        {
+            var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (!localFolder.StartsWith(profile, StringComparison.OrdinalIgnoreCase))
+            {
+                TransferStatus?.Invoke("Handoff needs a folder under your user profile (C:\\Users\\...).");
+                return;
+            }
+
+            int count = 0;
+            foreach (var f in EnumerateProject(localFolder))
+            {
+                await SendHandoffFile(ch, f, Path.GetRelativePath(profile, f));
+                count++;
+            }
+
+            // The matching Claude Code session (so the same conversation is available on the other PC).
+            var claudeDir = Path.Combine(profile, ".claude", "projects", EncodeProject(localFolder));
+            if (Directory.Exists(claudeDir))
+                foreach (var f in Directory.EnumerateFiles(claudeDir, "*", SearchOption.AllDirectories))
+                {
+                    await SendHandoffFile(ch, f, Path.GetRelativePath(profile, f));
+                    count++;
+                }
+
+            await ch.SendAsync(Fs.HandoffFinish(Path.GetRelativePath(profile, localFolder)), _cts.Token);
+            TransferStatus?.Invoke($"Handed off {count} files \u2014 opening VS Code on the other PC");
+        }
+        catch (Exception ex) { TransferStatus?.Invoke("Handoff failed: " + ex.Message); }
+    });
+
+    private static IEnumerable<string> EnumerateProject(string root)
+    {
+        var stack = new Stack<string>();
+        stack.Push(root);
+        while (stack.Count > 0)
+        {
+            var dir = stack.Pop();
+            string[] subs, files;
+            try { subs = Directory.GetDirectories(dir); files = Directory.GetFiles(dir); }
+            catch { continue; }
+            foreach (var f in files) yield return f;
+            foreach (var s in subs)
+                if (!HandoffSkip.Contains(Path.GetFileName(s))) stack.Push(s);
+        }
+    }
+
+    /// <summary>Encode a folder path the way Claude Code names its project session dir.</summary>
+    private static string EncodeProject(string full)
+    {
+        if (full.Length >= 2 && full[1] == ':') full = char.ToLowerInvariant(full[0]) + full[1..];
+        return full.Replace(':', '-').Replace('\\', '-').Replace('/', '-');
+    }
+
+    private async Task SendHandoffFile(SecureChannel ch, string fullPath, string rel)
+    {
+        TransferStatus?.Invoke("Sending " + rel);
+        using var fs = File.OpenRead(fullPath);
+        await ch.SendAsync(Fs.HandoffFile(rel, fs.Length), _cts.Token);
+        var buf = new byte[Fs.ChunkSize];
+        int n;
+        while ((n = await fs.ReadAsync(buf.AsMemory(0, buf.Length), _cts.Token)) > 0)
+            await ch.SendAsync(Fs.UploadChunk(buf, n), _cts.Token);
+        await ch.SendAsync(Fs.UploadEnd(), _cts.Token);
+    }
+
     public void Dispose()
     {
         _down = true;

@@ -25,6 +25,7 @@ if (!PairingKey.TryDecode(args[2], out var key))
 }
 bool measure = args.Length > 3 && args[3].Equals("measure", StringComparison.OrdinalIgnoreCase);
 bool filesTest = args.Length > 3 && args[3].Equals("files", StringComparison.OrdinalIgnoreCase);
+bool handoffTest = args.Length > 3 && args[3].Equals("handoff", StringComparison.OrdinalIgnoreCase);
 
 var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20)).Token;
 
@@ -47,6 +48,41 @@ try
     var (w, h) = Messages.ReadScreenInfo(first);
     Console.WriteLine($"PASS: screen info received: {w}x{h}.");
     if (w <= 0 || h <= 0) { Console.WriteLine("FAIL: bad screen dimensions."); return 1; }
+
+    if (handoffTest)
+    {
+        // Send two handoff files addressed relative to the profile; the host writes them under ITS
+        // profile. (We deliberately do NOT send HandoffFinish, so no VS Code launches during the test.)
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        async Task Push(string rel, byte[] content)
+        {
+            await channel.SendAsync(Fs.HandoffFile(rel, content.Length), timeout);
+            for (int o = 0; o < content.Length; o += Fs.ChunkSize)
+            {
+                int n = Math.Min(Fs.ChunkSize, content.Length - o);
+                var c = new byte[n]; Buffer.BlockCopy(content, o, c, 0, n);
+                await channel.SendAsync(Fs.UploadChunk(c, n), timeout);
+            }
+            await channel.SendAsync(Fs.UploadEnd(), timeout);
+        }
+        var rnd = new Random(7);
+        var c1 = new byte[500000]; rnd.NextBytes(c1);
+        var c2 = new byte[1500]; rnd.NextBytes(c2);
+        await Push("pane-handoff-test\\src\\a.bin", c1);
+        await Push("pane-handoff-test\\notes.txt", c2);
+        await Task.Delay(400);
+        var p1 = Path.Combine(profile, "pane-handoff-test", "src", "a.bin");
+        var p2 = Path.Combine(profile, "pane-handoff-test", "notes.txt");
+        bool ok = File.Exists(p1) && File.Exists(p2)
+                  && (await File.ReadAllBytesAsync(p1)).Length == c1.Length
+                  && (await File.ReadAllBytesAsync(p2)).AsSpan().SequenceEqual(c2);
+        try { Directory.Delete(Path.Combine(profile, "pane-handoff-test"), true); } catch { }
+        Console.WriteLine(ok ? $"PASS: handoff files landed rebased under {profile} (subfolders preserved)."
+                             : "FAIL: handoff files missing/mismatched.");
+        Console.WriteLine();
+        Console.WriteLine(ok ? "ALL PASS" : "FAILED");
+        return ok ? 0 : 1;
+    }
 
     if (filesTest)
     {

@@ -33,6 +33,12 @@ the network can connect.
 `Desktop\Pane Transfers`), or open the **Files** panel in a session to browse the remote machine and pull
 files back to `Downloads\Pane Transfers`.
 
+**Handoff:** drag a VS Code window onto Pane (or use the **Hand off** button) to move a project to the
+other PC — it syncs the folder (rebased to each PC's user profile) plus the matching Claude Code session,
+then opens VS Code there, so you continue the same work and the same conversation on the other machine.
+Skips regenerable folders (node_modules, bin, obj, .vs, dist, build). Needs VS Code installed on the host
+and the project under your user profile.
+
 ## Install the host (on the PC you want to control)
 
 1. Copy **`dist\PaneHostSetup.exe`** to that PC and double-click it. Approve the UAC prompt.

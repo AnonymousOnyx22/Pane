@@ -31,6 +31,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly DiscoveryListener _discovery = new();
     private readonly DispatcherTimer _presenceTimer;
     private readonly KeyboardHook _kbHook = new();
+    private readonly WindowDragHook _dragHook = new();
 
     public MainWindow()
     {
@@ -64,13 +65,76 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Closed += (_, __) =>
         {
             _kbHook.Dispose();
+            _dragHook.Dispose();
             _discovery.Dispose();
             foreach (var t in Tabs) (t.Content as IDisposable)?.Dispose();
         };
 
         _kbHook.OnKey = OnHookKey;
         try { _kbHook.Install(); } catch { /* fall back to WPF key handling */ }
+
+        _dragHook.GetTargetWindow = () => new WindowInteropHelper(this).Handle;
+        _dragHook.OnDroppedOnTarget = OnWindowDroppedOnPane;
+        try { _dragHook.Install(); } catch { /* drag-to-handoff unavailable; the Hand off button still works */ }
     }
+
+    /// <summary>A window was dragged onto Pane. If it's VS Code and a session is open, hand its folder off.</summary>
+    private void OnWindowDroppedOnPane(IntPtr hwnd)
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (SelectedContent is not RemoteView rv) return;
+            if (!WindowProcessName(hwnd).Equals("Code", StringComparison.OrdinalIgnoreCase)) return; // VS Code only
+            var folder = ResolveVsCodeFolder(WindowTitle(hwnd));
+            if (folder != null) rv.BeginHandoff(folder);
+            else rv.HandoffPick(); // couldn't auto-detect the folder; let the user pick
+        }));
+    }
+
+    private static string WindowProcessName(IntPtr hwnd)
+    {
+        try { GetWindowThreadProcessId(hwnd, out uint pid); return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; }
+        catch { return ""; }
+    }
+
+    private static string WindowTitle(IntPtr hwnd)
+    {
+        int len = GetWindowTextLength(hwnd);
+        if (len <= 0) return "";
+        var sb = new System.Text.StringBuilder(len + 1);
+        GetWindowText(hwnd, sb, sb.Capacity);
+        return sb.ToString();
+    }
+
+    /// <summary>Best-effort: find the folder a VS Code window has open from its title + common project roots.</summary>
+    private static string? ResolveVsCodeFolder(string title)
+    {
+        const string suffix = " - Visual Studio Code";
+        if (title.EndsWith(suffix, StringComparison.Ordinal)) title = title[..^suffix.Length];
+        var parts = title.Split(new[] { " - " }, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) return null;
+        var name = parts[^1].Trim().TrimStart('●', ' ').Trim(); // drop unsaved-dot prefix
+        if (string.IsNullOrEmpty(name)) return null;
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        foreach (var root in new[]
+        {
+            System.IO.Path.Combine(profile, "Downloads", "Projects"),
+            System.IO.Path.Combine(profile, "Downloads"),
+            System.IO.Path.Combine(profile, "source", "repos"),
+            System.IO.Path.Combine(profile, "Documents"),
+            System.IO.Path.Combine(profile, "Desktop"),
+            profile
+        })
+        {
+            var cand = System.IO.Path.Combine(root, name);
+            if (System.IO.Directory.Exists(cand)) return cand;
+        }
+        return null;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll")] private static extern int GetWindowTextLength(IntPtr hwnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, System.Text.StringBuilder sb, int max);
 
     /// <summary>
     /// Forward a key to the active remote session (and suppress it locally) only when Pane is the

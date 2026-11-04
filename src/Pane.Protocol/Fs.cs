@@ -27,6 +27,13 @@ public static class Fs
     public static byte[] UploadChunk(byte[] data, int len) => Raw(MsgType.UploadChunk, data, len);
     public static byte[] UploadEnd() => new[] { (byte)MsgType.UploadEnd };
 
+    // Handoff: files addressed relative to the user profile (so they rebase onto the other PC's profile,
+    // even if the username differs), then a finish that opens VS Code on the handed-off folder.
+    public static byte[] HandoffFile(string relFromProfile, long size) =>
+        Tagged(MsgType.HandoffFile, w => { WriteString(w, relFromProfile); WriteLong(w, size); });
+    public static byte[] HandoffFinish(string relFolderFromProfile) =>
+        Tagged(MsgType.HandoffFinish, w => WriteString(w, relFolderFromProfile));
+
     // --- Host -> Client ---
 
     public static byte[] DirListing(string path, IReadOnlyList<FsEntry> entries) => Tagged(MsgType.DirListing, w =>
