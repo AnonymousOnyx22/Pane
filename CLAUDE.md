@@ -38,5 +38,7 @@ without built-in Remote Desktop. Encrypted, pairing-key gated, LAN auto-discover
 - Handoff: drag a VS Code window onto Pane (WindowDragHook.cs) or the "Hand off" button -> push the project
   (rebased to each PC's user profile) + its Claude session (~/.claude/projects/<encoded>) and open VS Code
   on the other PC. Protocol HandoffFile/HandoffFinish; host rebases to its profile + launches code.cmd.
-- Perf: JPEG frames decoded off the client UI thread; host adaptive quality + capture/encode pipelining.
+- Clipboard: plain-text clipboard syncs both ways (MsgType.Clipboard; ClipboardSync.cs on host, timer in RemoteView).
+- Perf: JPEG frames decoded off the client UI thread; host adaptive quality + capture/encode pipelining; tall regions split into strips, JPEG
+  encoded/decoded in parallel on both sides.
 - Not yet field-tested on the two-PC setup with the v2 host (needs a one-time physical reinstall there).

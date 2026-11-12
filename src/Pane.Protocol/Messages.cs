@@ -18,6 +18,7 @@ public enum MsgType : byte
     MouseWheel = 22,  // int delta, byte horizontal(1/0), float nx, float ny
     Key = 23,         // ushort vk, byte down(1/0), byte extended(1/0)
     RequestFullFrame = 24,
+    Clipboard = 25,   // UTF-8 text (remainder of message). Sent in BOTH directions to sync the clipboard.
 
     // File transfer, Client -> Host
     ListDir = 40,       // string path ("" = list drives)
@@ -107,6 +108,17 @@ public static class Messages
         b[4] = (byte)(extended ? 1 : 0);
         return b;
     }
+
+    public static byte[] Clipboard(string text)
+    {
+        var t = Encoding.UTF8.GetBytes(text);
+        var b = new byte[1 + t.Length];
+        b[0] = (byte)MsgType.Clipboard;
+        Buffer.BlockCopy(t, 0, b, 1, t.Length);
+        return b;
+    }
+
+    public static string ReadClipboard(byte[] m) => Encoding.UTF8.GetString(m, 1, m.Length - 1);
 
     public static byte[] RequestFullFrame() => new[] { (byte)MsgType.RequestFullFrame };
 

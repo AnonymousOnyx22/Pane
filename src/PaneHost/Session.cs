@@ -46,13 +46,15 @@ public sealed class Session : IDisposable
 
             using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var files = new FileService(channel, sessionCts.Token);
+            var clip = new ClipboardSync();
             var captureLoop = Task.Run(() => CaptureLoop(channel, capture, sessionCts.Token), sessionCts.Token);
-            var inputLoop = Task.Run(() => InputLoop(channel, injector, capture, files, sessionCts.Token), sessionCts.Token);
+            var inputLoop = Task.Run(() => InputLoop(channel, injector, capture, files, clip, sessionCts.Token), sessionCts.Token);
+            var clipLoop = Task.Run(() => clip.RunAsync(channel, sessionCts.Token), sessionCts.Token);
             await Task.WhenAny(captureLoop, inputLoop);
             // One loop ended (usually the client disconnected). Stop the other and let both finish before
             // the capture device is disposed, so the capture loop never touches a disposed device.
             sessionCts.Cancel();
-            try { await Task.WhenAll(captureLoop, inputLoop); } catch { }
+            try { await Task.WhenAll(captureLoop, inputLoop, clipLoop); } catch { }
         }
         Log.Info($"Client {_remote} disconnected.");
     }
@@ -87,7 +89,7 @@ public sealed class Session : IDisposable
         try { await sending; } catch { }
     }
 
-    private static async Task InputLoop(SecureChannel channel, InputInjector injector, ScreenCapture capture, FileService files, CancellationToken ct)
+    private static async Task InputLoop(SecureChannel channel, InputInjector injector, ScreenCapture capture, FileService files, ClipboardSync clip, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -103,6 +105,8 @@ public sealed class Session : IDisposable
                     { var (dl, h, nx, ny) = Messages.ReadMouseWheel(msg); injector.MouseWheel(dl, h, nx, ny); break; }
                 case MsgType.Key:
                     { var (vk, d, ext) = Messages.ReadKey(msg); injector.Key(vk, d, ext); break; }
+                case MsgType.Clipboard:
+                    clip.Apply(Messages.ReadClipboard(msg)); break;
                 case MsgType.RequestFullFrame:
                     capture.ForceFullFrame(); break;
 

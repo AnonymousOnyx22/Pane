@@ -53,8 +53,42 @@ public partial class RemoteView : UserControl, IDisposable
         _client.FrameDecoded += rects => Dispatcher.BeginInvoke(() => OnFrame(rects), System.Windows.Threading.DispatcherPriority.Send);
         _client.Disconnected += reason => Dispatcher.Invoke(() => OnDisconnected(reason));
         _client.DirListing += (path, entries) => Dispatcher.Invoke(() => OnDirListing(path, entries));
+        _client.ClipboardReceived += t => Dispatcher.BeginInvoke(() =>
+        {
+            try { Clipboard.SetText(t); _clipSeq = GetClipboardSequenceNumber(); } catch { }
+        });
         _client.TransferStatus += s => Dispatcher.Invoke(() => ShowToast(s));
         _client.Start(string.IsNullOrWhiteSpace(_pc.Host) ? _pc.Id : _pc.Host, Net.TcpPort, key);
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern uint GetClipboardSequenceNumber();
+    private uint _clipSeq = GetClipboardSequenceNumber();
+    private DispatcherTimer? _clipTimer;
+
+    /// <summary>Send local clipboard text to the host whenever it changes (only while this tab is visible).</summary>
+    private void StartClipboardWatch()
+    {
+        _clipTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+        _clipTimer.Tick -= ClipTick;
+        _clipTimer.Tick += ClipTick;
+        _clipTimer.Start();
+    }
+
+    private void ClipTick(object? s, EventArgs e)
+    {
+        if (_closed || !IsVisible) return;
+        uint seq = GetClipboardSequenceNumber();
+        if (seq == _clipSeq) return;
+        _clipSeq = seq;
+        try
+        {
+            if (Clipboard.ContainsText())
+            {
+                var t = Clipboard.GetText();
+                if (!string.IsNullOrEmpty(t) && t.Length <= 1_000_000) _client?.SendClipboard(t);
+            }
+        }
+        catch { }
     }
 
     private void OnDisconnected(string reason)
@@ -72,6 +106,7 @@ public partial class RemoteView : UserControl, IDisposable
         _bmp = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
         Screen.Source = _bmp;
         Overlay.Visibility = Visibility.Collapsed;
+        StartClipboardWatch();
         Focus();
     }
 

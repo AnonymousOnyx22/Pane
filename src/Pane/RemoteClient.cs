@@ -25,6 +25,7 @@ public sealed class RemoteClient : IDisposable
     public event Action<string>? Disconnected;             // reason
 
     public event Action<string, List<FsEntry>>? DirListing; // path, entries
+    public event Action<string>? ClipboardReceived;         // text pushed from the host
     public event Action<string>? TransferStatus;            // human-readable progress/notice
 
     /// <summary>Where pulled files are written. Defaults to Downloads\Pane Transfers.</summary>
@@ -85,6 +86,8 @@ public sealed class RemoteClient : IDisposable
                     if (decoded.Count > 0) FrameDecoded?.Invoke(decoded);
                     break;
                 }
+            case MsgType.Clipboard:
+                ClipboardReceived?.Invoke(Messages.ReadClipboard(msg)); break;
             case MsgType.DirListing:
                 { var (path, entries) = Fs.ReadListing(msg); DirListing?.Invoke(path, entries); break; }
             case MsgType.FileBegin:
@@ -152,6 +155,7 @@ public sealed class RemoteClient : IDisposable
     public void SendMouseButton(int button, bool down, float nx, float ny) => Send(Messages.MouseButton(button, down, nx, ny));
     public void SendMouseWheel(int delta, bool horizontal, float nx, float ny) => Send(Messages.MouseWheel(delta, horizontal, nx, ny));
     public void SendKey(ushort vk, bool down, bool extended) => Send(Messages.Key(vk, down, extended));
+    public void SendClipboard(string text) => Send(Messages.Clipboard(text));
     public void RequestFullFrame() => Send(Messages.RequestFullFrame());
 
     // --- file transfer ---
