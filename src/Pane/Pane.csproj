@@ -1,7 +1,11 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\Pane.Protocol\Pane.Protocol.csproj" />
+    <ProjectReference Include="..\Pane.Media\Pane.Media.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
   </ItemGroup>
 
   <PropertyGroup>
@@ -10,6 +14,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>Pane</AssemblyName>
     <RootNamespace>Pane</RootNamespace>
     <Platforms>x64</Platforms>

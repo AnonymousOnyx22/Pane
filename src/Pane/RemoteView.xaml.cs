@@ -30,6 +30,13 @@ public partial class RemoteView : UserControl, IDisposable
     {
         InitializeComponent();
         _pc = pc;
+        // Viewing this same PC: playing its own sound back would feed straight into the capture (echo).
+        if (pc.Host is "127.0.0.1" or "localhost" or "::1")
+        {
+            _soundOn = false;
+            SoundBtn.Content = "Muted";
+            SoundBtn.Opacity = 0.6;
+        }
         _reconnectTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _reconnectTimer.Tick += (_, __) => { _reconnectTimer.Stop(); if (!_closed) Connect(); };
         Loaded += (_, __) => { Focus(); Keyboard.Focus(this); };
@@ -48,9 +55,16 @@ public partial class RemoteView : UserControl, IDisposable
         }
 
         _client?.Dispose();
-        _client = new RemoteClient();
+        var client = new RemoteClient { StartWithAudio = _soundOn };
+        _client = client;
         _client.Connected += (w, h) => Dispatcher.Invoke(() => OnConnected(w, h));
-        _client.FrameDecoded += rects => Dispatcher.BeginInvoke(() => OnFrame(rects), System.Windows.Threading.DispatcherPriority.Send);
+        _client.FrameDecoded += rects => Dispatcher.BeginInvoke(() => OnFrame(client, rects), DispatcherPriority.Send);
+        // Invoke (not BeginInvoke) so the bitmap is resized before any frame of the new size is queued.
+        _client.ScreenChanged += (w, h) => Dispatcher.Invoke(() => ResizeScreen(w, h));
+        _client.MonitorsChanged += (mons, cur) => Dispatcher.BeginInvoke(() => OnMonitors(mons, cur));
+        _client.CodecChanged += name => Dispatcher.BeginInvoke(() => _codecName = name);
+        _client.ClipboardImageReceived += png => Dispatcher.BeginInvoke(() => SetClipboardImage(png));
+        _client.ClipboardFilesReceived += paths => Dispatcher.BeginInvoke(() => SetClipboardFiles(paths));
         _client.Disconnected += reason => Dispatcher.Invoke(() => OnDisconnected(reason));
         _client.DirListing += (path, entries) => Dispatcher.Invoke(() => OnDirListing(path, entries));
         _client.ClipboardReceived += t => Dispatcher.BeginInvoke(() =>
@@ -65,7 +79,7 @@ public partial class RemoteView : UserControl, IDisposable
     private uint _clipSeq = GetClipboardSequenceNumber();
     private DispatcherTimer? _clipTimer;
 
-    /// <summary>Send local clipboard text to the host whenever it changes (only while this tab is visible).</summary>
+    /// <summary>Send the local clipboard (files, text or an image) to the host whenever it changes, while this tab is visible.</summary>
     private void StartClipboardWatch()
     {
         _clipTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
@@ -82,13 +96,135 @@ public partial class RemoteView : UserControl, IDisposable
         _clipSeq = seq;
         try
         {
-            if (Clipboard.ContainsText())
+            if (Clipboard.ContainsFileDropList())
+            {
+                var paths = Clipboard.GetFileDropList().Cast<string>().ToList();
+                if (paths.Count == 0) return;
+                if (MeasureBytes(paths) > MaxClipBytes)
+                {
+                    ShowToast("Too big to copy through the clipboard \u2014 drag it onto the screen instead");
+                    return;
+                }
+                _ = _client?.SendClipFilesAsync(paths);
+            }
+            else if (Clipboard.ContainsText())
             {
                 var t = Clipboard.GetText();
                 if (!string.IsNullOrEmpty(t) && t.Length <= 1_000_000) _client?.SendClipboard(t);
             }
+            else if (Clipboard.ContainsImage())
+            {
+                var img = Clipboard.GetImage();
+                if (img == null) return;
+                var enc = new PngBitmapEncoder();
+                enc.Frames.Add(BitmapFrame.Create(img));
+                using var ms = new MemoryStream();
+                enc.Save(ms);
+                if (ms.Length <= 32 * 1024 * 1024) _client?.SendClipboardImage(ms.ToArray());
+            }
         }
         catch { }
+    }
+
+    private const long MaxClipBytes = 512L * 1024 * 1024;
+
+    private static long MeasureBytes(IEnumerable<string> paths)
+    {
+        long total = 0;
+        foreach (var p in paths)
+        {
+            try
+            {
+                if (File.Exists(p)) total += new FileInfo(p).Length;
+                else if (Directory.Exists(p))
+                    foreach (var f in Directory.EnumerateFiles(p, "*", SearchOption.AllDirectories))
+                    {
+                        total += new FileInfo(f).Length;
+                        if (total > MaxClipBytes) return total;
+                    }
+            }
+            catch { }
+        }
+        return total;
+    }
+
+    private void SetClipboardImage(byte[] png)
+    {
+        try
+        {
+            var bmp = new BitmapImage();
+            bmp.BeginInit();
+            bmp.CacheOption = BitmapCacheOption.OnLoad;
+            bmp.StreamSource = new MemoryStream(png);
+            bmp.EndInit();
+            bmp.Freeze();
+            Clipboard.SetImage(bmp);
+            _clipSeq = GetClipboardSequenceNumber();
+        }
+        catch { }
+    }
+
+    private void SetClipboardFiles(List<string> paths)
+    {
+        try
+        {
+            var sc = new System.Collections.Specialized.StringCollection();
+            sc.AddRange(paths.ToArray());
+            Clipboard.SetFileDropList(sc);
+            _clipSeq = GetClipboardSequenceNumber();
+            ShowToast($"Copied {paths.Count} item(s) from the other PC \u2014 paste with Ctrl+V");
+        }
+        catch { }
+    }
+
+    // --- monitors / sound ---
+
+    private List<MonitorInfo> _monitors = new();
+    private int _monitorIdx = -1;     // the display the user picked (kept across reconnects)
+    private bool _soundOn = true;
+    private string _codecName = "JPEG";
+
+    private void OnMonitors(List<MonitorInfo> mons, int current)
+    {
+        _monitors = mons;
+        MonitorBtn.Visibility = mons.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+        if (_monitorIdx >= 0 && _monitorIdx < mons.Count && current != _monitorIdx)
+        {
+            _client?.SelectMonitor(_monitorIdx); // reconnect: go back to the display the user chose
+            return;
+        }
+        UpdateMonitorLabel(current);
+    }
+
+    private void UpdateMonitorLabel(int current)
+    {
+        MonitorBtn.Content = _monitors.Count > 1 ? $"Screen {current + 1} of {_monitors.Count}" : "Screen 1";
+    }
+
+    private void Monitor_Click(object sender, RoutedEventArgs e)
+    {
+        if (_monitors.Count < 2 || _client == null) return;
+        int cur = _monitorIdx >= 0 ? _monitorIdx : Math.Max(0, _monitors.FindIndex(m => m.Primary));
+        _monitorIdx = (cur + 1) % _monitors.Count;
+        UpdateMonitorLabel(_monitorIdx);
+        _client.SelectMonitor(_monitorIdx);
+    }
+
+    private void Sound_Click(object sender, RoutedEventArgs e)
+    {
+        _soundOn = !_soundOn;
+        SoundBtn.Content = _soundOn ? "Sound on" : "Muted";
+        SoundBtn.Opacity = _soundOn ? 1.0 : 0.6;
+        if (_client != null) _client.AudioOn = _soundOn;
+    }
+
+    /// <summary>The host switched display or resolution: recreate the bitmap at the new size.</summary>
+    private void ResizeScreen(int w, int h)
+    {
+        if (w <= 0 || h <= 0 || (w == _w && h == _h && _bmp != null)) return;
+        _w = w; _h = h;
+        _bmp = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
+        Screen.Source = _bmp;
     }
 
     private void OnDisconnected(string reason)
@@ -111,15 +247,21 @@ public partial class RemoteView : UserControl, IDisposable
         Focus();
     }
 
-    private void OnFrame(List<DecodedRect> rects)
+    private void OnFrame(RemoteClient client, List<DecodedRect> rects)
     {
-        if (_bmp == null) return;
         // Pixels are already decoded off-thread; this is just a fast memcpy into the bitmap.
         foreach (var r in rects)
         {
-            if (r.X + r.W > _w || r.Y + r.H > _h) continue;
-            try { _bmp.WritePixels(new Int32Rect(r.X, r.Y, r.W, r.H), r.Bgra, r.Stride, 0); }
-            catch { /* next full frame heals it */ }
+            if (_bmp != null && r.X + r.W <= _w && r.Y + r.H <= _h)
+            {
+                try { _bmp.WritePixels(new Int32Rect(r.X, r.Y, r.W, r.H), r.Bgra, r.Stride, 0); }
+                catch { /* next full frame heals it */ }
+            }
+            if (r.Pooled)
+            {
+                System.Threading.Interlocked.Decrement(ref client.UiBacklog);
+                client.Recycle(r);
+            }
         }
     }
 
@@ -292,7 +434,7 @@ public partial class RemoteView : UserControl, IDisposable
         {
             double fps = (f - _lastFrames) / dt;
             double kbs = (b - _lastBytes) / 1024.0 / dt;
-            StatsText.Text = $"{fps:N0} fps  ·  {kbs:N0} KB/s";
+            StatsText.Text = $"{fps:N0} fps  \u00b7  {kbs:N0} KB/s  \u00b7  {_codecName}";
         }
         _lastFrames = f; _lastBytes = b; _lastStat = DateTime.UtcNow;
     }

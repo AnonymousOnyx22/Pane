@@ -20,6 +20,12 @@
                 <Button x:Name="HandoffBtn" Content="Hand off" Style="{StaticResource GhostButton}"
                         Padding="12,5" Margin="0,0,8,0" Click="Handoff_Click"
                         ToolTip="Send a project (files + VS Code + Claude conversation) to this PC"/>
+                <Button x:Name="MonitorBtn" Content="Screen 1" Style="{StaticResource GhostButton}"
+                        Padding="12,5" Margin="0,0,8,0" Click="Monitor_Click" Visibility="Collapsed"
+                        ToolTip="Switch which of the other PC's displays you are viewing"/>
+                <Button x:Name="SoundBtn" Content="Sound on" Style="{StaticResource GhostButton}"
+                        Padding="12,5" Margin="0,0,8,0" Click="Sound_Click"
+                        ToolTip="Play the other PC's audio here"/>
                 <Button x:Name="QualityBtn" Content="Balanced" Style="{StaticResource GhostButton}"
                         Padding="12,5" Margin="0,0,8,0" Click="Quality_Click"
                         ToolTip="Image quality: Smooth (fastest) / Balanced / Sharp (best looking)"/>
@@ -38,7 +44,7 @@
             <Border x:Name="DropHint" Background="#B0000000" Visibility="Collapsed" IsHitTestVisible="False">
                 <Border BorderBrush="{StaticResource Fg}" BorderThickness="2" CornerRadius="16"
                         Margin="40" Background="#40FFFFFF">
-                    <TextBlock Text="Drop files to send to the other PC" Foreground="{StaticResource Fg}"
+                    <TextBlock Text="Drop files to send to the other PC (or just copy them: Ctrl+C here, Ctrl+V there)" Foreground="{StaticResource Fg}"
                                FontSize="18" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 </Border>
             </Border>

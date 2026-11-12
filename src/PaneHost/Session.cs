@@ -1,14 +1,24 @@
 using System.Net.Sockets;
+using System.Threading.Channels;
+using Pane.Media;
 using Pane.Protocol;
 
 namespace PaneHost;
 
-/// <summary>Handles one connected client: authenticates, streams frames, and injects received input.</summary>
+/// <summary>
+/// Handles one connected client: authenticates, streams the screen (JPEG tiles or H.264, whichever the
+/// client asks for), streams system audio on request, syncs the clipboard, and injects received input.
+/// </summary>
 public sealed class Session : IDisposable
 {
     private readonly TcpClient _client;
     private readonly byte[] _pairingKey;
     private readonly string _remote;
+
+    // Settings the client can change mid-session (written by the input loop, read by the capture loop).
+    private volatile byte _codec = Codec.Jpeg;
+    private volatile bool _keyframe;
+    private volatile int _bitrate = 30_000_000;
 
     public Session(TcpClient client, byte[] pairingKey)
     {
@@ -39,57 +49,193 @@ public sealed class Session : IDisposable
 
         using (channel)
         using (var capture = new ScreenCapture())
+        using (var audio = new LoopbackAudio())
         {
             capture.Initialize();
             var injector = new InputInjector(capture.ScreenX, capture.ScreenY, capture.Width, capture.Height);
             await channel.SendAsync(Messages.ScreenInfo(capture.Width, capture.Height), ct);
+            await SendMonitorList(channel, capture, ct);
 
             using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var files = new FileService(channel, sessionCts.Token);
+            var token = sessionCts.Token;
+            var files = new FileService(channel, token);
             var clip = new ClipboardSync();
-            var captureLoop = Task.Run(() => CaptureLoop(channel, capture, sessionCts.Token), sessionCts.Token);
-            var inputLoop = Task.Run(() => InputLoop(channel, injector, capture, files, clip, sessionCts.Token), sessionCts.Token);
-            var clipLoop = Task.Run(() => clip.RunAsync(channel, sessionCts.Token), sessionCts.Token);
+
+            // Audio: the capture thread queues packets; one sender keeps them in order.
+            var audioQueue = System.Threading.Channels.Channel.CreateBounded<byte[]>(
+                new BoundedChannelOptions(64) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
+            audio.Data += (rate, ch, pcm) => audioQueue.Writer.TryWrite(Messages.Audio(rate, ch, pcm));
+
+            var captureLoop = Task.Run(() => CaptureLoop(channel, capture, injector, token), token);
+            var inputLoop = Task.Run(() => InputLoop(channel, injector, capture, files, clip, audio, token), token);
+            var clipLoop = Task.Run(() => clip.RunAsync(channel, files, token), token);
+            var audioLoop = Task.Run(async () =>
+            {
+                await foreach (var pkt in audioQueue.Reader.ReadAllAsync(token))
+                    await channel.SendAsync(pkt, token);
+            }, token);
+
             await Task.WhenAny(captureLoop, inputLoop);
-            // One loop ended (usually the client disconnected). Stop the other and let both finish before
+            // One loop ended (usually the client disconnected). Stop the others and let them finish before
             // the capture device is disposed, so the capture loop never touches a disposed device.
             sessionCts.Cancel();
-            try { await Task.WhenAll(captureLoop, inputLoop, clipLoop); } catch { }
+            audio.Stop();
+            try { await Task.WhenAll(captureLoop, inputLoop, clipLoop, audioLoop); } catch { }
         }
         Log.Info($"Client {_remote} disconnected.");
     }
 
-    private static async Task CaptureLoop(SecureChannel channel, ScreenCapture capture, CancellationToken ct)
+    private static Task SendMonitorList(SecureChannel channel, ScreenCapture capture, CancellationToken ct)
     {
-        // Pipelined: the GPU captures/extracts the next frame on this thread while a worker JPEG-encodes
-        // and sends the previous one, so encode+network time is overlapped with capture instead of serial.
-        // AcquireNextFrame paces to the monitor's refresh; sends are awaited in order for correctness.
-        Task sending = Task.CompletedTask;
-        while (!ct.IsCancellationRequested)
-        {
-            List<RawTile> raw;
-            try { raw = capture.CaptureRaw(200); }
-            catch (Exception ex)
-            {
-                if (!ct.IsCancellationRequested) Log.Info($"Capture error: {ex.Message}");
-                break;
-            }
-            if (raw.Count == 0) continue;
-
-            try { await sending; }
-            catch (OperationCanceledException) { break; }
-            catch { break; }
-
-            sending = Task.Run(async () =>
-            {
-                var rects = raw.AsParallel().AsOrdered().Select(ScreenCapture.Encode).ToList();
-                await channel.SendAsync(Messages.Frame(rects), ct);
-            }, ct);
-        }
-        try { await sending; } catch { }
+        List<MonitorInfo> mons;
+        try { mons = ScreenCapture.ListMonitors(); } catch { mons = new(); }
+        return channel.SendAsync(Messages.MonitorList(mons, capture.MonitorIndex), ct);
     }
 
-    private static async Task InputLoop(SecureChannel channel, InputInjector injector, ScreenCapture capture, FileService files, ClipboardSync clip, CancellationToken ct)
+    private async Task CaptureLoop(SecureChannel channel, ScreenCapture capture, InputInjector injector, CancellationToken ct)
+    {
+        // Pipelined: this thread captures (and for H.264, converts + encodes) the next frame while a worker
+        // sends the previous one. AcquireNextFrame paces to the monitor's refresh; sends stay in order.
+        Task sending = Task.CompletedTask;
+        int gen = capture.Generation;
+        byte active = Codec.Jpeg; // sessions start on JPEG; CodecInfo is only sent on a change
+        H264Encoder? enc = null;
+        byte[] nv12 = Array.Empty<byte>();
+        int refresh = 0, encFailures = 0;
+        bool haveFrame = false;
+
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                // --- codec changes ---
+                byte codec = _codec;
+                if (codec != active)
+                {
+                    active = codec;
+                    enc?.Dispose(); enc = null;
+                    capture.ForceFullFrame();
+                    if (codec == Codec.Jpeg)
+                    {
+                        await sending;
+                        await channel.SendAsync(Messages.CodecInfo(Codec.Jpeg, "JPEG"), ct);
+                    }
+                }
+
+                if (codec == Codec.H264)
+                {
+                    if (_keyframe) { _keyframe = false; enc?.Dispose(); enc = null; }
+                    if (enc == null)
+                    {
+                        try
+                        {
+                            enc = H264Encoder.Create(capture.Width, capture.Height, 60, _bitrate);
+                            nv12 = new byte[Nv12.Size(enc.Width, enc.Height)];
+                            haveFrame = false;
+                            capture.ForceFullFrame();
+                            Log.Info($"H.264 encoder: {enc.Name} at {capture.Width}x{capture.Height}, {_bitrate / 1_000_000} Mbps");
+                            await sending;
+                            await channel.SendAsync(Messages.CodecInfo(Codec.H264, enc.Name), ct);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Info($"H.264 unavailable, using JPEG: {ex.Message}");
+                            enc = null;
+                            _codec = Codec.Jpeg;
+                            continue;
+                        }
+                    }
+
+                    var e = enc;
+                    bool mismatch = false;
+                    bool got = capture.CaptureFull(refresh > 0 ? 16 : 100, (ptr, pitch) =>
+                    {
+                        int w = capture.Width, h = capture.Height;
+                        if (H264Encoder.Align16(w) != e.Width || H264Encoder.Align16(h) != e.Height) { mismatch = true; return; }
+                        ConvertToNv12(ptr, pitch, w, h, nv12, e.Width, e.Height);
+                    });
+
+                    if (capture.Generation != gen || mismatch)
+                    {
+                        gen = capture.Generation;
+                        await OnTargetChanged(channel, capture, injector, sending, ct);
+                        enc.Dispose(); enc = null;
+                        continue;
+                    }
+
+                    if (got) { haveFrame = true; refresh = 30; }
+                    else if (refresh > 0 && haveFrame) refresh--;   // re-encode the still image so it sharpens
+                    else continue;
+
+                    List<byte[]> aus;
+                    try { aus = enc.Encode(nv12); encFailures = 0; }
+                    catch (Exception ex)
+                    {
+                        Log.Info($"Encode failed: {ex.Message}");
+                        enc.Dispose(); enc = null;
+                        if (++encFailures >= 3) _codec = Codec.Jpeg;
+                        continue;
+                    }
+                    if (aus.Count == 0) continue;
+
+                    try { await sending; } catch { break; }
+                    sending = Task.Run(async () =>
+                    {
+                        foreach (var au in aus) await channel.SendAsync(Messages.VideoFrame(au), ct);
+                    }, ct);
+                }
+                else
+                {
+                    List<RawTile> raw;
+                    try { raw = capture.CaptureRaw(200); }
+                    catch (Exception ex)
+                    {
+                        if (!ct.IsCancellationRequested) Log.Info($"Capture error: {ex.Message}");
+                        break;
+                    }
+                    if (capture.Generation != gen)
+                    {
+                        gen = capture.Generation;
+                        await OnTargetChanged(channel, capture, injector, sending, ct);
+                        capture.ForceFullFrame();
+                        continue; // this frame may predate the size change; the forced full frame follows
+                    }
+                    if (raw.Count == 0) continue;
+
+                    try { await sending; } catch { break; }
+                    sending = Task.Run(async () =>
+                    {
+                        var rects = raw.AsParallel().AsOrdered().Select(ScreenCapture.Encode).ToList();
+                        await channel.SendAsync(Messages.Frame(rects), ct);
+                    }, ct);
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { if (!ct.IsCancellationRequested) Log.Info($"Capture loop ended: {ex.Message}"); }
+        finally
+        {
+            try { await sending; } catch { }
+            enc?.Dispose();
+        }
+    }
+
+    /// <summary>The captured display changed (monitor switch or rebuild): retarget input and tell the client.</summary>
+    private static async Task OnTargetChanged(SecureChannel channel, ScreenCapture capture, InputInjector injector, Task sending, CancellationToken ct)
+    {
+        injector.SetTarget(capture.ScreenX, capture.ScreenY, capture.Width, capture.Height);
+        try { await sending; } catch { }
+        await channel.SendAsync(Messages.ScreenInfo(capture.Width, capture.Height), ct);
+        await SendMonitorList(channel, capture, ct);
+    }
+
+    private static unsafe void ConvertToNv12(IntPtr src, int pitch, int w, int h, byte[] dst, int dw, int dh)
+    {
+        fixed (byte* d = dst) Nv12.FromBgra((byte*)src, pitch, w, h, d, dw, dh);
+    }
+
+    private async Task InputLoop(SecureChannel channel, InputInjector injector, ScreenCapture capture, FileService files,
+                                 ClipboardSync clip, LoopbackAudio audio, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -105,12 +251,36 @@ public sealed class Session : IDisposable
                     { var (dl, h, nx, ny) = Messages.ReadMouseWheel(msg); injector.MouseWheel(dl, h, nx, ny); break; }
                 case MsgType.Key:
                     { var (vk, d, ext) = Messages.ReadKey(msg); injector.Key(vk, d, ext); break; }
-                case MsgType.SetQuality:
-                    ScreenCapture.SetQuality(msg[1], msg[2]); break;
-                case MsgType.Clipboard:
-                    clip.Apply(Messages.ReadClipboard(msg)); break;
                 case MsgType.RequestFullFrame:
-                    capture.ForceFullFrame(); break;
+                    capture.ForceFullFrame();
+                    if (_codec == Codec.H264) _keyframe = true;
+                    break;
+                case MsgType.SetQuality:
+                    {
+                        int high = msg[1], low = msg[2];
+                        ScreenCapture.SetQuality(high, low);
+                        _bitrate = high >= 95 ? 60_000_000 : high >= 85 ? 30_000_000 : 12_000_000;
+                        if (_codec == Codec.H264) _keyframe = true; // rebuild the encoder at the new bitrate
+                        break;
+                    }
+                case MsgType.SetCodec:
+                    if (msg.Length > 1 && (msg[1] == Codec.Jpeg || msg[1] == Codec.H264)) _codec = msg[1];
+                    break;
+                case MsgType.SelectMonitor:
+                    capture.SelectMonitor(Messages.ReadSelectMonitor(msg)); break;
+                case MsgType.SetAudio:
+                    if (msg.Length > 1 && msg[1] == 1) audio.Start(); else audio.Stop();
+                    break;
+
+                // Clipboard
+                case MsgType.Clipboard:
+                    clip.ApplyText(Messages.ReadClipboard(msg)); break;
+                case MsgType.ClipboardImage:
+                    clip.ApplyImage(Messages.Payload(msg)); break;
+                case MsgType.ClipFile:
+                    { var (rp, sz) = Fs.ReadBegin(msg); files.ClipFile(rp, sz); break; }
+                case MsgType.ClipFilesDone:
+                    clip.ApplyFiles(files.ClipFilesDone(Fs.ReadNames(msg))); break;
 
                 // File transfer
                 case MsgType.ListDir:

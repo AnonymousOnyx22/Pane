@@ -9,13 +9,16 @@ namespace PaneHost;
 /// </summary>
 public sealed class InputInjector
 {
-    private readonly int _screenX, _screenY, _screenW, _screenH; // captured monitor, in pixels
+    private volatile int _screenX, _screenY, _screenW, _screenH; // captured monitor, in pixels
     private int VirtW => GetSystemMetrics(SM_CXVIRTUALSCREEN);
     private int VirtH => GetSystemMetrics(SM_CYVIRTUALSCREEN);
     private int VirtX => GetSystemMetrics(SM_XVIRTUALSCREEN);
     private int VirtY => GetSystemMetrics(SM_YVIRTUALSCREEN);
 
-    public InputInjector(int screenX, int screenY, int screenW, int screenH)
+    public InputInjector(int screenX, int screenY, int screenW, int screenH) => SetTarget(screenX, screenY, screenW, screenH);
+
+    /// <summary>Retarget input after the captured monitor changes.</summary>
+    public void SetTarget(int screenX, int screenY, int screenW, int screenH)
     {
         _screenX = screenX; _screenY = screenY; _screenW = screenW; _screenH = screenH;
     }

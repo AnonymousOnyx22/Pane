@@ -6,12 +6,13 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using Pane.Media;
 using Pane.Protocol;
 
 namespace Pane;
 
 /// <summary>A decoded screen rectangle: BGRA32 pixels ready to blit at (X,Y).</summary>
-public readonly record struct DecodedRect(int X, int Y, int W, int H, byte[] Bgra, int Stride);
+public readonly record struct DecodedRect(int X, int Y, int W, int H, byte[] Bgra, int Stride, bool Pooled = false);
 
 /// <summary>
 /// Client side of one remote session: connects, authenticates with the pairing key, receives frames,
@@ -26,6 +27,11 @@ public sealed class RemoteClient : IDisposable
 
     public event Action<string, List<FsEntry>>? DirListing; // path, entries
     public event Action<string>? ClipboardReceived;         // text pushed from the host
+    public event Action<byte[]>? ClipboardImageReceived;    // PNG pushed from the host
+    public event Action<List<string>>? ClipboardFilesReceived; // local paths of files copied on the host
+    public event Action<int, int>? ScreenChanged;           // host switched monitor / resolution
+    public event Action<List<MonitorInfo>, int>? MonitorsChanged; // all host displays + the captured one
+    public event Action<string>? CodecChanged;              // e.g. "H.264 · NVIDIA H.264 Encoder MFT"
     public event Action<string>? TransferStatus;            // human-readable progress/notice
 
     /// <summary>Where pulled files are written. Defaults to Downloads\Pane Transfers.</summary>
@@ -39,6 +45,23 @@ public sealed class RemoteClient : IDisposable
 
     private FileStream? _dlStream;
     private int _dlFiles;
+
+    // Video
+    private H264Decoder? _decoder;
+    private bool _h264Failed;
+    private volatile int _w, _h;
+    private readonly System.Collections.Concurrent.ConcurrentQueue<byte[]> _framePool = new();
+    /// <summary>Frames handed to the UI but not drawn yet. Video frames are skipped (not queued) when
+    /// the UI falls behind, so latency never builds up.</summary>
+    public int UiBacklog;
+
+    // Audio
+    private readonly AudioPlayer _audio = new();
+    private bool _audioOn = true;
+
+    // Clipboard files arriving from the host go to a temp batch folder instead of Downloads.
+    private string? _clipDir;
+    private readonly SemaphoreSlim _uploadLock = new(1, 1); // one outgoing file stream at a time
 
     private long _frames, _bytes;
     public long TotalFrames => Interlocked.Read(ref _frames);
@@ -56,7 +79,17 @@ public sealed class RemoteClient : IDisposable
             if (first == null || Messages.TypeOf(first) != MsgType.ScreenInfo)
                 throw new Exception("Host did not send screen info.");
             var (w, h) = Messages.ReadScreenInfo(first);
+            _w = w; _h = h;
             Connected?.Invoke(w, h);
+
+            // Ask for H.264 when this PC can decode it (the host falls back to JPEG on its own if it
+            // cannot encode), and for sound if it is enabled.
+            if (!_h264Failed)
+            {
+                try { _decoder = new H264Decoder(); Send(Messages.SetCodec(Codec.H264)); }
+                catch { _decoder = null; _h264Failed = true; }
+            }
+            if (_audioOn) Send(Messages.SetAudio(true));
 
             while (!_cts.IsCancellationRequested)
             {
@@ -86,8 +119,54 @@ public sealed class RemoteClient : IDisposable
                     if (decoded.Count > 0) FrameDecoded?.Invoke(decoded);
                     break;
                 }
+            case MsgType.VideoFrame:
+                Interlocked.Increment(ref _frames);
+                Interlocked.Add(ref _bytes, msg.Length);
+                DecodeVideo(msg);
+                break;
+            case MsgType.ScreenInfo:
+                {
+                    var (w, h) = Messages.ReadScreenInfo(msg);
+                    _w = w; _h = h;
+                    ScreenChanged?.Invoke(w, h);
+                    break;
+                }
+            case MsgType.MonitorList:
+                { var (mons, cur) = Messages.ReadMonitorList(msg); MonitorsChanged?.Invoke(mons, cur); break; }
+            case MsgType.CodecInfo:
+                {
+                    var (c, name) = Messages.ReadCodecInfo(msg);
+                    CodecChanged?.Invoke(c == Codec.H264 ? "H.264 \u00b7 " + ShortEncoderName(name) : "JPEG");
+                    break;
+                }
+            case MsgType.Audio:
+                {
+                    Interlocked.Add(ref _bytes, msg.Length);
+                    var (rate, ch) = Messages.ReadAudioHeader(msg);
+                    _audio.Push(rate, ch, msg, 6, msg.Length - 6);
+                    break;
+                }
             case MsgType.Clipboard:
                 ClipboardReceived?.Invoke(Messages.ReadClipboard(msg)); break;
+            case MsgType.ClipboardImage:
+                ClipboardImageReceived?.Invoke(Messages.Payload(msg).ToArray()); break;
+            case MsgType.HostClipBegin:
+                _clipDir = Path.Combine(Path.GetTempPath(), "Pane Clipboard", DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));
+                break;
+            case MsgType.HostClipDone:
+                {
+                    var dir = _clipDir; _clipDir = null;
+                    if (dir == null) break;
+                    var paths = new List<string>();
+                    foreach (var n in Fs.ReadNames(msg))
+                    {
+                        var full = Path.Combine(dir, n);
+                        if (!File.Exists(full) && !Directory.Exists(full)) { try { Directory.CreateDirectory(full); } catch { continue; } }
+                        paths.Add(full);
+                    }
+                    if (paths.Count > 0) ClipboardFilesReceived?.Invoke(paths);
+                    break;
+                }
             case MsgType.DirListing:
                 { var (path, entries) = Fs.ReadListing(msg); DirListing?.Invoke(path, entries); break; }
             case MsgType.FileBegin:
@@ -127,13 +206,132 @@ public sealed class RemoteClient : IDisposable
         var (relPath, _) = Fs.ReadBegin(msg);
         try
         {
-            var dest = Path.Combine(DownloadDir, relPath);
+            bool clip = _clipDir != null;
+            var dest = Path.Combine(_clipDir ?? DownloadDir, SafeRelative(relPath));
             Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
             _dlStream = File.Create(dest);
-            _dlFiles++;
-            TransferStatus?.Invoke("Downloading " + relPath);
+            if (!clip) { _dlFiles++; TransferStatus?.Invoke("Downloading " + relPath); }
         }
         catch (Exception ex) { TransferStatus?.Invoke("Download failed: " + ex.Message); }
+    }
+
+    /// <summary>Keep a host-supplied relative path inside the destination folder.</summary>
+    private static string SafeRelative(string rel)
+    {
+        var parts = rel.Replace('/', '\\').Split('\\', StringSplitOptions.RemoveEmptyEntries)
+                       .Where(x => x != "." && x != ".." && !(x.Length >= 2 && x[1] == ':'));
+        var joined = string.Join('\\', parts);
+        return joined.Length == 0 ? "file.bin" : joined;
+    }
+
+    private static string ShortEncoderName(string name)
+    {
+        if (name.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase)) return "NVIDIA GPU";
+        if (name.Contains("Intel", StringComparison.OrdinalIgnoreCase)) return "Intel GPU";
+        if (name.Contains("AMD", StringComparison.OrdinalIgnoreCase)) return "AMD GPU";
+        if (name.Contains("software", StringComparison.OrdinalIgnoreCase)) return "CPU";
+        return name;
+    }
+
+    /// <summary>Decode one H.264 access unit (always, to keep the decoder's reference frames intact) and,
+    /// unless the UI is behind, convert it to BGRA and hand it over.</summary>
+    private unsafe void DecodeVideo(byte[] msg)
+    {
+        var dec = _decoder;
+        if (dec == null) return;
+        int w = _w, h = _h;
+        try
+        {
+            dec.Decode(msg, 1, msg.Length - 1, (p, stride, planeH, pw, ph) =>
+            {
+                if (Volatile.Read(ref UiBacklog) >= 2) return; // UI behind: drop this picture, never queue
+                int cw = Math.Min(w, pw), chh = Math.Min(h, ph);
+                if (cw <= 0 || chh <= 0) return;
+                int need = cw * chh * 4;
+                if (!_framePool.TryDequeue(out var buf) || buf.Length != need) buf = new byte[need];
+                Nv12.ToBgra(p, stride, planeH, cw, chh, buf);
+                Interlocked.Increment(ref UiBacklog);
+                FrameDecoded?.Invoke(new List<DecodedRect> { new(0, 0, cw, chh, buf, cw * 4, Pooled: true) });
+            });
+        }
+        catch
+        {
+            // A broken decoder: drop to JPEG for the rest of this connection.
+            _h264Failed = true;
+            try { _decoder?.Dispose(); } catch { }
+            _decoder = null;
+            Send(Messages.SetCodec(Codec.Jpeg));
+        }
+    }
+
+    /// <summary>Return a full-frame buffer once the UI has copied it.</summary>
+    public void Recycle(DecodedRect r)
+    {
+        if (r.Pooled && _framePool.Count < 4) _framePool.Enqueue(r.Bgra);
+    }
+
+    public void SelectMonitor(int index) => Send(Messages.SelectMonitor(index));
+
+    /// <summary>Set before Start: whether to ask for sound when the session opens.</summary>
+    public bool StartWithAudio { get => _audioOn; set { _audioOn = value; _audio.Muted = !value; } }
+
+    public bool AudioOn
+    {
+        get => _audioOn;
+        set
+        {
+            _audioOn = value;
+            _audio.Muted = !value;
+            Send(Messages.SetAudio(value));
+        }
+    }
+
+    public void SendClipboardImage(byte[] png) => Send(Messages.ClipboardImage(png));
+
+    /// <summary>Copy local files/folders to the host's clipboard (sent to a temp folder there, then put
+    /// on its clipboard so Ctrl+V pastes them).</summary>
+    public Task SendClipFilesAsync(IReadOnlyList<string> paths) => Task.Run(async () =>
+    {
+        var ch = _channel;
+        if (ch == null) return;
+        await _uploadLock.WaitAsync();
+        try
+        {
+            var names = new List<string>();
+            int count = 0;
+            foreach (var p in paths)
+            {
+                if (File.Exists(p))
+                {
+                    names.Add(Path.GetFileName(p));
+                    await SendClipFileAsync(ch, p, Path.GetFileName(p)); count++;
+                }
+                else if (Directory.Exists(p))
+                {
+                    var baseName = new DirectoryInfo(p.TrimEnd('\\', '/')).Name;
+                    names.Add(baseName);
+                    foreach (var f in Directory.EnumerateFiles(p, "*", SearchOption.AllDirectories))
+                    {
+                        await SendClipFileAsync(ch, f, Path.Combine(baseName, Path.GetRelativePath(p, f))); count++;
+                    }
+                }
+            }
+            await ch.SendAsync(Fs.ClipFilesDone(names), _cts.Token);
+            TransferStatus?.Invoke($"Copied {count} file(s) to the other PC's clipboard \u2014 paste with Ctrl+V there");
+        }
+        catch (Exception ex) { TransferStatus?.Invoke("Clipboard copy failed: " + ex.Message); }
+        finally { _uploadLock.Release(); }
+    });
+
+    private async Task SendClipFileAsync(SecureChannel ch, string fullPath, string rel)
+    {
+        using var fs = File.OpenRead(fullPath);
+        await ch.SendAsync(Fs.ClipFile(rel, fs.Length), _cts.Token);
+        var buf = new byte[Fs.ChunkSize];
+        int n;
+        while ((n = await fs.ReadAsync(buf.AsMemory(0, buf.Length), _cts.Token)) > 0)
+            await ch.SendAsync(Fs.UploadChunk(buf, n), _cts.Token);
+        await ch.SendAsync(Fs.UploadEnd(), _cts.Token);
     }
 
     private void Fail(string reason)
@@ -169,6 +367,7 @@ public sealed class RemoteClient : IDisposable
     {
         var ch = _channel;
         if (ch == null) return;
+        await _uploadLock.WaitAsync();
         try
         {
             int count = 0;
@@ -188,6 +387,7 @@ public sealed class RemoteClient : IDisposable
             TransferStatus?.Invoke($"Sent {count} file(s) to the other PC's Desktop\\Pane Transfers");
         }
         catch (Exception ex) { TransferStatus?.Invoke("Upload failed: " + ex.Message); }
+        finally { _uploadLock.Release(); }
     });
 
     private async Task SendOneAsync(SecureChannel ch, string fullPath, string relPath)
@@ -215,6 +415,7 @@ public sealed class RemoteClient : IDisposable
     {
         var ch = _channel;
         if (ch == null) return;
+        await _uploadLock.WaitAsync();
         try
         {
             var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -244,6 +445,7 @@ public sealed class RemoteClient : IDisposable
             TransferStatus?.Invoke($"Handed off {count} files \u2014 opening VS Code on the other PC");
         }
         catch (Exception ex) { TransferStatus?.Invoke("Handoff failed: " + ex.Message); }
+        finally { _uploadLock.Release(); }
     });
 
     private static IEnumerable<string> EnumerateProject(string root)
@@ -286,6 +488,9 @@ public sealed class RemoteClient : IDisposable
         _down = true;
         try { _cts.Cancel(); } catch { }
         try { _dlStream?.Dispose(); } catch { }
+        try { _decoder?.Dispose(); } catch { }
+        _decoder = null;
+        _audio.Dispose();
         _channel?.Dispose();
         _tcp?.Dispose();
         _cts.Dispose();

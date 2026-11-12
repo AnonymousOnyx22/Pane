@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Pane.Protocol\Pane.Protocol.csproj" />
+    <ProjectReference Include="..\Pane.Media\Pane.Media.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -28,36 +28,79 @@ public sealed class ScreenCapture : IDisposable
     private bool _needReinit;
     private bool _loggedLost;
 
-    public void Initialize()
+    /// <summary>Index (into <see cref="ListMonitors"/>) of the display being captured.</summary>
+    public int MonitorIndex { get; private set; } = -1;
+    /// <summary>Bumped every time the capture target is (re)built, so the session can resend ScreenInfo.</summary>
+    public int Generation { get; private set; }
+    private volatile int _requestedMonitor = -1;
+    private bool _haveStaging;
+
+    /// <summary>All attached displays, in a stable order (adapter, then output).</summary>
+    public static List<MonitorInfo> ListMonitors()
+    {
+        var list = new List<MonitorInfo>();
+        using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory1>();
+        for (uint ai = 0; factory.EnumAdapters1(ai, out var adapter).Success; ai++)
+        {
+            using (adapter)
+            {
+                for (uint oi = 0; adapter.EnumOutputs(oi, out var output).Success; oi++)
+                {
+                    using (output)
+                    {
+                        var d = output.Description;
+                        if (!d.AttachedToDesktop) continue;
+                        var c = d.DesktopCoordinates;
+                        list.Add(new MonitorInfo(c.Left, c.Top, c.Right - c.Left, c.Bottom - c.Top, c.Left == 0 && c.Top == 0));
+                    }
+                }
+            }
+        }
+        return list;
+    }
+
+    /// <summary>Ask the capture thread to switch displays (applied on its next capture call).</summary>
+    public void SelectMonitor(int index) => _requestedMonitor = index;
+
+    public void Initialize() => Initialize(MonitorIndex);
+
+    private void Initialize(int wanted)
     {
         DisposeDevice();
         using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory1>();
 
+        // Walk outputs in the same order as ListMonitors; take the wanted one, else the primary.
         IDXGIAdapter1? chosenAdapter = null;
         IDXGIOutput1? chosenOutput = null;
+        int chosenIndex = -1, idx = 0;
+        bool exact = false;
         for (uint ai = 0; factory.EnumAdapters1(ai, out var adapter).Success; ai++)
         {
             for (uint oi = 0; adapter.EnumOutputs(oi, out var output).Success; oi++)
             {
                 var desc = output.Description;
-                var o1 = output.QueryInterface<IDXGIOutput1>();
-                bool isPrimary = desc.DesktopCoordinates.Left == 0 && desc.DesktopCoordinates.Top == 0;
-                if (desc.AttachedToDesktop && (chosenOutput == null || isPrimary))
+                if (desc.AttachedToDesktop)
                 {
-                    chosenOutput?.Dispose();
-                    chosenAdapter?.Dispose();
-                    chosenOutput = o1;
-                    chosenAdapter = adapter;
-                    if (isPrimary) { goto found; }
+                    bool isPrimary = desc.DesktopCoordinates.Left == 0 && desc.DesktopCoordinates.Top == 0;
+                    bool take = !exact && (idx == wanted || isPrimary || chosenOutput == null);
+                    if (take)
+                    {
+                        chosenOutput?.Dispose();
+                        if (chosenAdapter != null && !ReferenceEquals(chosenAdapter, adapter)) chosenAdapter.Dispose();
+                        chosenOutput = output.QueryInterface<IDXGIOutput1>();
+                        chosenAdapter = adapter;
+                        chosenIndex = idx;
+                        exact = idx == wanted;
+                    }
+                    idx++;
                 }
-                else { o1.Dispose(); }
                 output.Dispose();
             }
-            if (chosenAdapter != adapter) adapter.Dispose();
+            if (!ReferenceEquals(chosenAdapter, adapter)) adapter.Dispose();
         }
-    found:
         if (chosenAdapter == null || chosenOutput == null)
             throw new InvalidOperationException("No attached display output found.");
+        MonitorIndex = chosenIndex;
 
         D3D11.D3D11CreateDevice(chosenAdapter, DriverType.Unknown, DeviceCreationFlags.BgraSupport,
             new[] { FeatureLevel.Level_11_0, FeatureLevel.Level_10_1, FeatureLevel.Level_10_0 },
@@ -88,8 +131,92 @@ public sealed class ScreenCapture : IDisposable
         _needFullFrame = true;
         _needReinit = false;
         _loggedLost = false;
+        _haveStaging = false;
+        Generation++;
         chosenOutput.Dispose();
         chosenAdapter.Dispose();
+    }
+
+    /// <summary>Apply a pending monitor switch or a lost-device rebuild. Returns false while the display is unavailable.</summary>
+    private bool EnsureReady()
+    {
+        int req = _requestedMonitor;
+        if (req >= 0)
+        {
+            _requestedMonitor = -1;
+            if (req != MonitorIndex)
+            {
+                int prev = MonitorIndex;
+                try { Initialize(req); Log.Info($"Switched capture to monitor {MonitorIndex} ({Width}x{Height})."); }
+                catch (Exception ex) { Log.Info($"Monitor switch failed: {ex.Message}"); MonitorIndex = prev; _needReinit = true; }
+            }
+        }
+        if (_needReinit)
+        {
+            try { Initialize(MonitorIndex); }
+            catch
+            {
+                if (!_loggedLost) { Log.Info("Display unavailable (UAC/secure desktop or switch); waiting to resume..."); _loggedLost = true; }
+                Thread.Sleep(150);
+                return false;
+            }
+            Log.Info("Display reacquired; resuming capture.");
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// H.264 path: wait up to <paramref name="timeoutMs"/> for a new desktop image and hand the whole frame
+    /// (mapped BGRA pointer, row pitch) to <paramref name="consume"/>. When a full frame is forced but the
+    /// screen is idle, re-delivers the last captured image so a keyframe can still be produced.
+    /// Returns false if nothing was delivered.
+    /// </summary>
+    public bool CaptureFull(int timeoutMs, Action<IntPtr, int> consume)
+    {
+        if (!EnsureReady()) return false;
+        try
+        {
+            var result = _dupl.AcquireNextFrame((uint)timeoutMs, out var frameInfo, out var desktopResource);
+            if (result == Vortice.DXGI.ResultCode.WaitTimeout)
+            {
+                if (_needFullFrame && _haveStaging) { _needFullFrame = false; MapAndConsume(consume); return true; }
+                return false;
+            }
+            if (result == Vortice.DXGI.ResultCode.AccessLost) { _needReinit = true; return false; }
+            result.CheckError();
+            try
+            {
+                bool hasNewImage = desktopResource != null && frameInfo.LastPresentTime != 0;
+                if (!hasNewImage)
+                {
+                    if (_needFullFrame && _haveStaging) { _needFullFrame = false; MapAndConsume(consume); return true; }
+                    return false;
+                }
+                using var tex = desktopResource!.QueryInterface<ID3D11Texture2D>();
+                _context.CopyResource(_staging, tex);
+                _haveStaging = true;
+                _needFullFrame = false;
+                MapAndConsume(consume);
+                return true;
+            }
+            finally
+            {
+                desktopResource?.Dispose();
+                _dupl.ReleaseFrame();
+            }
+        }
+        catch (Exception)
+        {
+            _needReinit = true;
+            return false;
+        }
+    }
+
+    private void MapAndConsume(Action<IntPtr, int> consume)
+    {
+        var map = _context.Map(_staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+        try { consume(map.DataPointer, (int)map.RowPitch); }
+        finally { _context.Unmap(_staging, 0); }
     }
 
     /// <summary>
@@ -99,27 +226,24 @@ public sealed class ScreenCapture : IDisposable
     /// </summary>
     public List<RawTile> CaptureRaw(int timeoutMs)
     {
-        // Rebuild the duplication after a desktop switch (UAC secure desktop, lock screen, resolution
-        // change, session reconnect). While the secure desktop is up, DuplicateOutput keeps failing, so we
-        // just keep retrying on later calls and return no changes — the client holds its last frame and the
-        // session stays alive, then resumes automatically when the normal desktop returns.
-        if (_needReinit)
-        {
-            try { Initialize(); }
-            catch
-            {
-                if (!_loggedLost) { Log.Info("Display unavailable (UAC/secure desktop or switch); waiting to resume..."); _loggedLost = true; }
-                Thread.Sleep(150);
-                return new List<RawTile>();
-            }
-            Log.Info("Display reacquired; resuming capture.");
-        }
+        // Rebuild after a desktop switch (UAC secure desktop, lock screen, resolution change) or apply a
+        // monitor switch. While the secure desktop is up we return no changes and the client holds its
+        // last frame; capture resumes automatically when the normal desktop returns.
+        if (!EnsureReady()) return new List<RawTile>();
 
         try
         {
         var result = _dupl.AcquireNextFrame((uint)timeoutMs, out var frameInfo, out var desktopResource);
         if (result == Vortice.DXGI.ResultCode.WaitTimeout)
+        {
+            // Idle screen but a full frame was requested: resend the last image we have.
+            if (_needFullFrame && _haveStaging)
+            {
+                _needFullFrame = false;
+                return ExtractRaw(new List<Vortice.RawRect> { new(0, 0, Width, Height) });
+            }
             return new List<RawTile>();
+        }
         if (result == Vortice.DXGI.ResultCode.AccessLost)
         {
             _needReinit = true;
@@ -140,6 +264,7 @@ public sealed class ScreenCapture : IDisposable
 
             using var tex = desktopResource.QueryInterface<ID3D11Texture2D>();
             _context.CopyResource(_staging, tex);
+            _haveStaging = true;
 
             var rects = new List<Vortice.RawRect>();
             if (_needFullFrame)

@@ -14,3 +14,4 @@ src/PaneHostSetup/embed/*.exe
 
 # Logs / local data
 *.log
+frame-dump.bin

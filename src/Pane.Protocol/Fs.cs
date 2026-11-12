@@ -34,6 +34,17 @@ public static class Fs
     public static byte[] HandoffFinish(string relFolderFromProfile) =>
         Tagged(MsgType.HandoffFinish, w => WriteString(w, relFolderFromProfile));
 
+    // Clipboard files (both directions share the names list format: top-level names joined by '\n').
+    public static byte[] ClipFile(string relPath, long size) =>
+        Tagged(MsgType.ClipFile, w => { WriteString(w, relPath); WriteLong(w, size); });
+    public static byte[] ClipFilesDone(IEnumerable<string> topNames) =>
+        Tagged(MsgType.ClipFilesDone, w => WriteString(w, string.Join('\n', topNames)));
+    public static byte[] HostClipBegin() => new[] { (byte)MsgType.HostClipBegin };
+    public static byte[] HostClipDone(IEnumerable<string> topNames) =>
+        Tagged(MsgType.HostClipDone, w => WriteString(w, string.Join('\n', topNames)));
+    public static string[] ReadNames(byte[] m) =>
+        ReadPath(m).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
     // --- Host -> Client ---
 
     public static byte[] DirListing(string path, IReadOnlyList<FsEntry> entries) => Tagged(MsgType.DirListing, w =>

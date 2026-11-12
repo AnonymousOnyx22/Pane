@@ -53,7 +53,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Opacity = 0;
         SizeChanged += (_, __) => UpdateClip();
         StateChanged += (_, __) => UpdateChrome();
-        Loaded += (_, __) => { UpdateClip(); UpdateChrome(); PlayIntro(); };
+        Loaded += (_, __) => { UpdateClip(); UpdateChrome(); PlayIntro(); OpenFromCommandLine(); };
 
         _discovery.HostSeen += OnHostSeen;
         try { _discovery.Start(); } catch { /* another listener may hold the port */ }
@@ -255,6 +255,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     // --- tabs ---
+
+    /// <summary>
+    /// <c>Pane.exe --connect &lt;host&gt; [key]</c> opens a session straight away (handy for a desktop
+    /// shortcut). Without a key, the saved PC with that host address or name supplies it.
+    /// </summary>
+    private void OpenFromCommandLine()
+    {
+        var args = Environment.GetCommandLineArgs();
+        int i = Array.FindIndex(args, a => a.Equals("--connect", StringComparison.OrdinalIgnoreCase));
+        if (i < 0 || i + 1 >= args.Length) return;
+        var host = args[i + 1];
+        var key = i + 2 < args.Length ? args[i + 2] : null;
+        var pc = _pcs.FirstOrDefault(p => p.Host.Equals(host, StringComparison.OrdinalIgnoreCase)
+                                       || p.Name.Equals(host, StringComparison.OrdinalIgnoreCase));
+        if (pc == null || key != null)
+            pc = new SavedPc { Name = pc?.Name ?? host, Host = pc?.Host ?? host, Key = key ?? pc?.Key ?? "" };
+        OpenSession(pc);
+    }
 
     private void OpenSession(SavedPc pc)
     {

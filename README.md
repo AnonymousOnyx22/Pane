@@ -22,12 +22,20 @@ A minimal, custom Windows remote desktop built as two small programs:
   a grid of rounded tiles, one per PC, each with an online dot. Click a tile to open that PC's live screen
   in a new tab with full mouse, keyboard and scroll. Saved PCs persist between launches.
 - **Pane Host** — a tiny background program for the PC you want to control (works on Windows 11 Home,
-  which has no built-in Remote Desktop host). It captures the primary monitor with the Desktop Duplication
-  API, sends only the changed screen regions as compressed frames over an encrypted TCP connection, and
-  injects mouse/keyboard with SendInput. It announces itself over UDP so Pane finds it automatically.
+  which has no built-in Remote Desktop host). It captures any of its monitors with the Desktop Duplication
+  API, streams them as **H.264 video from the GPU encoder** (NVIDIA / Intel / AMD, with a software fallback,
+  and JPEG tiles as a last resort) over an encrypted TCP connection, streams its **sound**, and injects
+  mouse/keyboard with SendInput. It announces itself over UDP so Pane finds it automatically.
 
 Everything is encrypted (ephemeral ECDH + AES-256-GCM) and gated by a **pairing key**, so nothing else on
 the network can connect.
+
+**In a session:** the toolbar switches between the other PC's **screens**, turns its **sound** on/off,
+picks a **quality** preset (Smooth / Balanced / Sharp), and shows a live **fps** readout (with the codec in
+use). The **clipboard is shared** both ways: text, images, and files (Ctrl+C a file on one PC, Ctrl+V it
+in Explorer on the other; up to 512 MB per copy).
+
+`Pane.exe --connect <host> [key]` opens a session straight away (good for a desktop shortcut).
 
 **Files:** drag files or folders onto the remote screen to send them to the other PC (they land in
 `Desktop\Pane Transfers`), or open the **Files** panel in a session to browse the remote machine and pull

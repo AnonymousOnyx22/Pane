@@ -10,7 +10,11 @@ public enum MsgType : byte
 {
     // Host -> Client
     ScreenInfo = 1,   // int width, int height
-    Frame = 2,        // int rectCount, then per rect: int x,y,w,h, int compLen, bytes (Deflate of BGRA32)
+    Frame = 2,        // int rectCount, then per rect: int x,y,w,h, int compLen, bytes (JPEG)
+    MonitorList = 3,  // int count, int current, then per monitor: int x,y,w,h, byte primary
+    VideoFrame = 4,   // one H.264 Annex-B access unit (remainder of message)
+    Audio = 5,        // int sampleRate, byte channels, then interleaved PCM16 (remainder)
+    CodecInfo = 6,    // byte codec (0=JPEG, 1=H.264), string encoderName
 
     // Client -> Host
     MouseMove = 20,   // float nx, float ny   (0..1 across the shared screen)
@@ -20,6 +24,10 @@ public enum MsgType : byte
     RequestFullFrame = 24,
     SetQuality = 26,  // byte highQuality, byte lowQuality (JPEG 1-100) for static / moving regions
     Clipboard = 25,   // UTF-8 text (remainder of message). Sent in BOTH directions to sync the clipboard.
+    SelectMonitor = 27, // int index into the MonitorList
+    ClipboardImage = 28, // PNG bytes (remainder). Both directions.
+    SetAudio = 29,    // byte on(1/0): stream the host's sound or not
+    SetCodec = 30,    // byte codec (0=JPEG, 1=H.264) the client wants
 
     // File transfer, Client -> Host
     ListDir = 40,       // string path ("" = list drives)
@@ -30,6 +38,9 @@ public enum MsgType : byte
     // Handoff (push a project + its Claude session to the other PC and open it there)
     HandoffFile = 46,   // string relPathFromUserProfile, long size  (then UploadChunk* / UploadEnd)
     HandoffFinish = 47, // string relFolderFromUserProfile  -> host opens VS Code on it
+    // Clipboard files, Client -> Host: ClipFile* (each followed by UploadChunk*/UploadEnd) then ClipFilesDone
+    ClipFile = 48,      // string relPath, long size
+    ClipFilesDone = 49, // string topLevelNames joined by '\n' -> host puts them on its clipboard
 
     // File transfer, Host -> Client
     DirListing = 60,    // string path, int count, then {string name, byte isDir, long size}
@@ -38,7 +49,15 @@ public enum MsgType : byte
     FileEnd = 63,       // (none)
     TransferDone = 64,  // (none) marks the end of a Download (one file or a whole folder)
     FsError = 65,       // string message
+    // Clipboard files, Host -> Client: HostClipBegin, FileBegin/FileChunk/FileEnd*, HostClipDone
+    HostClipBegin = 66, // (none) following FileBegin streams belong to a clipboard copy
+    HostClipDone = 67,  // string topLevelNames joined by '\n'
 }
+
+/// <summary>One display on the host.</summary>
+public readonly record struct MonitorInfo(int X, int Y, int W, int H, bool Primary);
+
+public static class Codec { public const byte Jpeg = 0, H264 = 1; }
 
 /// <summary>A changed rectangle of the screen, pixels as Deflate-compressed BGRA32 (stride = w*4).</summary>
 public readonly record struct FrameRect(int X, int Y, int W, int H, byte[] Compressed);
@@ -122,6 +141,83 @@ public static class Messages
     public static string ReadClipboard(byte[] m) => Encoding.UTF8.GetString(m, 1, m.Length - 1);
 
     public static byte[] SetQuality(int high, int low) => new[] { (byte)MsgType.SetQuality, (byte)high, (byte)low };
+
+    public static byte[] MonitorList(IReadOnlyList<MonitorInfo> mons, int current)
+    {
+        using var ms = new MemoryStream();
+        ms.WriteByte((byte)MsgType.MonitorList);
+        WriteInt(ms, mons.Count);
+        WriteInt(ms, current);
+        foreach (var m in mons)
+        {
+            WriteInt(ms, m.X); WriteInt(ms, m.Y); WriteInt(ms, m.W); WriteInt(ms, m.H);
+            ms.WriteByte((byte)(m.Primary ? 1 : 0));
+        }
+        return ms.ToArray();
+    }
+
+    public static (List<MonitorInfo> mons, int current) ReadMonitorList(byte[] m)
+    {
+        int o = 1;
+        int count = ReadInt(m, ref o);
+        int cur = ReadInt(m, ref o);
+        var list = new List<MonitorInfo>(count);
+        for (int i = 0; i < count; i++)
+        {
+            int x = ReadInt(m, ref o), y = ReadInt(m, ref o), w = ReadInt(m, ref o), h = ReadInt(m, ref o);
+            list.Add(new MonitorInfo(x, y, w, h, m[o++] == 1));
+        }
+        return (list, cur);
+    }
+
+    public static byte[] SelectMonitor(int index)
+    {
+        var b = new byte[5];
+        b[0] = (byte)MsgType.SelectMonitor;
+        BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(1), index);
+        return b;
+    }
+    public static int ReadSelectMonitor(byte[] m) => BinaryPrimitives.ReadInt32LittleEndian(m.AsSpan(1));
+
+    public static byte[] VideoFrame(byte[] au) => Tagged(MsgType.VideoFrame, au);
+
+    public static byte[] Audio(int sampleRate, int channels, byte[] pcm)
+    {
+        var b = new byte[6 + pcm.Length];
+        b[0] = (byte)MsgType.Audio;
+        BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(1), sampleRate);
+        b[5] = (byte)channels;
+        Buffer.BlockCopy(pcm, 0, b, 6, pcm.Length);
+        return b;
+    }
+    /// <summary>Returns (rate, channels); the PCM starts at offset 6.</summary>
+    public static (int rate, int channels) ReadAudioHeader(byte[] m)
+        => (BinaryPrimitives.ReadInt32LittleEndian(m.AsSpan(1)), m[5]);
+
+    public static byte[] CodecInfo(byte codec, string name)
+    {
+        var n = Encoding.UTF8.GetBytes(name);
+        var b = new byte[2 + n.Length];
+        b[0] = (byte)MsgType.CodecInfo; b[1] = codec;
+        Buffer.BlockCopy(n, 0, b, 2, n.Length);
+        return b;
+    }
+    public static (byte codec, string name) ReadCodecInfo(byte[] m) => (m[1], Encoding.UTF8.GetString(m, 2, m.Length - 2));
+
+    public static byte[] SetCodec(byte codec) => new[] { (byte)MsgType.SetCodec, codec };
+    public static byte[] SetAudio(bool on) => new[] { (byte)MsgType.SetAudio, (byte)(on ? 1 : 0) };
+    public static byte[] ClipboardImage(byte[] png) => Tagged(MsgType.ClipboardImage, png);
+
+    /// <summary>The payload after the 1-byte tag.</summary>
+    public static ArraySegment<byte> Payload(byte[] m) => new(m, 1, m.Length - 1);
+
+    private static byte[] Tagged(MsgType t, byte[] payload)
+    {
+        var b = new byte[1 + payload.Length];
+        b[0] = (byte)t;
+        Buffer.BlockCopy(payload, 0, b, 1, payload.Length);
+        return b;
+    }
 
     public static byte[] RequestFullFrame() => new[] { (byte)MsgType.RequestFullFrame };
 

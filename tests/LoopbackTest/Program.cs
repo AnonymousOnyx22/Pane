@@ -49,6 +49,178 @@ try
     Console.WriteLine($"PASS: screen info received: {w}x{h}.");
     if (w <= 0 || h <= 0) { Console.WriteLine("FAIL: bad screen dimensions."); return 1; }
 
+    var second = await channel.ReceiveAsync(timeout);
+    if (second == null || Messages.TypeOf(second) != MsgType.MonitorList) { Console.WriteLine("FAIL: expected MonitorList after ScreenInfo."); return 1; }
+    var (mons, curMon) = Messages.ReadMonitorList(second);
+    curMon = Math.Max(0, curMon);
+    Console.WriteLine($"PASS: monitor list: {mons.Count} display(s), capturing #{curMon} " +
+                      $"({string.Join(", ", mons.Select(m => $"{m.W}x{m.H}{(m.Primary ? "*" : "")}"))}).");
+
+    string mode = args.Length > 3 ? args[3].ToLowerInvariant() : "";
+
+    if (mode == "h264")
+    {
+        // H.264 path: ask for video, decode every access unit with the same decoder the client uses,
+        // and report throughput. Wiggles a small window-free change (a pixel-level cursor move is not
+        // captured), so the frame count mostly reflects real screen activity plus the sharpening frames.
+        await channel.SendAsync(Messages.SetCodec(Codec.H264), timeout);
+        await channel.SendAsync(Messages.RequestFullFrame(), timeout);
+        using var dec = new Pane.Media.H264Decoder();
+        var clock = Stopwatch.StartNew();
+        string encName = "?"; int aus = 0, pics = 0, picW = 0, picH = 0; long bytes = 0, firstMs = -1;
+        bool sawIdr = false; double decMs = 0;
+        var bgra = new byte[w * h * 4];
+        while (clock.Elapsed < TimeSpan.FromSeconds(6))
+        {
+            var m = await channel.ReceiveAsync(timeout);
+            if (m == null) { Console.WriteLine("FAIL: session closed."); return 1; }
+            switch (Messages.TypeOf(m))
+            {
+                case MsgType.CodecInfo:
+                    { var (c, n) = Messages.ReadCodecInfo(m); encName = n; if (c != Codec.H264) { Console.WriteLine("FAIL: host fell back to " + n); return 1; } break; }
+                case MsgType.VideoFrame:
+                    {
+                        aus++; bytes += m.Length;
+                        if (firstMs < 0) { firstMs = clock.ElapsedMilliseconds; sawIdr = Pane.Media.H264.ContainsNal(m.AsSpan(1), 5); }
+                        var t0 = Stopwatch.GetTimestamp();
+                        var (n, pw, phh) = VideoProbe.Decode(dec, m, w, h, bgra);
+                        pics += n; if (n > 0) { picW = pw; picH = phh; }
+                        decMs += Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+                        break;
+                    }
+            }
+        }
+        Console.WriteLine($"Encoder: {encName}");
+        Console.WriteLine(firstMs >= 0 ? $"PASS: first video frame after {firstMs} ms (starts with IDR: {sawIdr})." : "FAIL: no video frames.");
+        Console.WriteLine(pics > 0 ? $"PASS: decoded {pics}/{aus} access units, picture {picW}x{picH} for a {w}x{h} screen." : "FAIL: nothing decoded.");
+        Console.WriteLine($"      {bytes / 1024.0:N0} KiB total, avg decode+convert {(pics > 0 ? decMs / pics : 0):N2} ms/frame.");
+        bool ok = firstMs >= 0 && sawIdr && pics > 0 && picW >= w && picH >= h;
+        Console.WriteLine(); Console.WriteLine(ok ? "ALL PASS" : "FAILED");
+        return ok ? 0 : 1;
+    }
+
+    if (mode == "monitor")
+    {
+        if (mons.Count < 2) { Console.WriteLine("SKIP: only one display."); return 0; }
+        bool allOk = true;
+        foreach (var codec in new[] { Codec.Jpeg, Codec.H264 })
+        {
+            await channel.SendAsync(Messages.SetCodec(codec), timeout);
+            int target = curMon == 0 ? 1 : 0;
+            await channel.SendAsync(Messages.SelectMonitor(target), timeout);
+            int sw2 = 0, sh2 = 0, listCur = -1; bool frameAfter = false;
+            var clock = Stopwatch.StartNew();
+            while (clock.Elapsed < TimeSpan.FromSeconds(5) && !(sw2 > 0 && listCur == target && frameAfter))
+            {
+                var m = await channel.ReceiveAsync(timeout);
+                if (m == null) break;
+                var t = Messages.TypeOf(m);
+                if (t == MsgType.ScreenInfo) (sw2, sh2) = Messages.ReadScreenInfo(m);
+                else if (t == MsgType.MonitorList) listCur = Messages.ReadMonitorList(m).current;
+                else if ((t == MsgType.Frame || t == MsgType.VideoFrame) && sw2 > 0) frameAfter = true;
+            }
+            var want = mons[target];
+            bool ok = sw2 == want.W && sh2 == want.H && listCur == target && frameAfter;
+            Console.WriteLine(ok ? $"PASS: [{(codec == Codec.H264 ? "H.264" : "JPEG")}] switched to display #{target} ({sw2}x{sh2}) and frames kept coming."
+                                 : $"FAIL: [{codec}] after switch: screen {sw2}x{sh2}, list says #{listCur}, frames={frameAfter}.");
+            allOk &= ok;
+            curMon = target;
+        }
+        await channel.SendAsync(Messages.SelectMonitor(0), timeout);
+        Console.WriteLine(); Console.WriteLine(allOk ? "ALL PASS" : "FAILED");
+        return allOk ? 0 : 1;
+    }
+
+    if (mode == "audio")
+    {
+        // Play a quiet 1 s tone locally while asking the host for its sound; on loopback the host captures
+        // that tone and must stream it back.
+        await channel.SendAsync(Messages.SetAudio(true), timeout);
+        using var tone = new NAudio.Wave.WasapiOut(NAudio.CoreAudioApi.AudioClientShareMode.Shared, 50);
+        var sig = new NAudio.Wave.SampleProviders.SignalGenerator(48000, 2) { Frequency = 440, Gain = 0.03 };
+        tone.Init(new NAudio.Wave.SampleProviders.SampleToWaveProvider(new NAudio.Wave.SampleProviders.OffsetSampleProvider(sig) { Take = TimeSpan.FromSeconds(1.2) }));
+        tone.Play();
+        var clock = Stopwatch.StartNew();
+        int pkts = 0; long pcmBytes = 0; int rate = 0, chans = 0, peak = 0;
+        while (clock.Elapsed < TimeSpan.FromSeconds(3))
+        {
+            var recv = channel.ReceiveAsync(timeout);
+            var m = await recv;
+            if (m == null) break;
+            if (Messages.TypeOf(m) != MsgType.Audio) continue;
+            (rate, chans) = Messages.ReadAudioHeader(m);
+            pkts++; pcmBytes += m.Length - 6;
+            for (int i = 6; i + 1 < m.Length; i += 2) peak = Math.Max(peak, Math.Abs((int)BitConverter.ToInt16(m, i)));
+        }
+        await channel.SendAsync(Messages.SetAudio(false), timeout);
+        bool ok = pkts > 0 && peak > 100;
+        Console.WriteLine(ok ? $"PASS: received {pkts} audio packets, {pcmBytes / 1024} KiB PCM16 @ {rate} Hz x{chans}, peak {peak}."
+                             : $"FAIL: audio packets={pkts}, peak={peak}.");
+        Console.WriteLine(); Console.WriteLine(ok ? "ALL PASS" : "FAILED");
+        return ok ? 0 : 1;
+    }
+
+    if (mode == "clipboard")
+    {
+        // Text: push text to the host, then read this PC's clipboard (same machine on loopback).
+        var marker = "pane-clip-test-" + Guid.NewGuid().ToString("N")[..8];
+        await channel.SendAsync(Messages.Clipboard(marker), timeout);
+        await Task.Delay(500);
+        var got = ClipboardProbe.ReadText();
+        bool textOk = got == marker;
+        Console.WriteLine(textOk ? "PASS: text reached the host clipboard." : $"FAIL: host clipboard has '{got}'.");
+
+        // Files: push a small folder as a clipboard copy; the host must put it on its clipboard as CF_HDROP.
+        var rnd = new Random(3); var content = new byte[200_000]; rnd.NextBytes(content);
+        await channel.SendAsync(Fs.ClipFile("cliptest\\inner\\a.bin", content.Length), timeout);
+        await channel.SendAsync(Fs.UploadChunk(content, content.Length), timeout);
+        await channel.SendAsync(Fs.UploadEnd(), timeout);
+        await channel.SendAsync(Fs.ClipFilesDone(new[] { "cliptest" }), timeout);
+        await Task.Delay(500);
+        var files = ClipboardProbe.ReadFiles();
+        bool filesOk = files.Count == 1 && File.Exists(Path.Combine(files[0], "inner", "a.bin"))
+                       && new FileInfo(Path.Combine(files[0], "inner", "a.bin")).Length == content.Length;
+        Console.WriteLine(filesOk ? $"PASS: copied folder is on the host clipboard ({files[0]})." : $"FAIL: clipboard files = [{string.Join(", ", files)}].");
+        if (files.Count == 1) try { Directory.Delete(Path.GetDirectoryName(files[0])!, true); } catch { }
+
+        // Image: push a PNG; host must expose it as CF_DIB.
+        var png = ClipboardProbe.MakePng(64, 48);
+        await channel.SendAsync(Messages.ClipboardImage(png), timeout);
+        await Task.Delay(500);
+        bool imgOk = ClipboardProbe.HasDib();
+        Console.WriteLine(imgOk ? "PASS: image reached the host clipboard (CF_DIB)." : "FAIL: no image on the host clipboard.");
+
+        // Host -> client: copy a folder on "the host" (this PC) and expect it streamed to us as a clipboard
+        // copy (HostClipBegin, file stream, HostClipDone). Nothing we pushed above may be echoed back.
+        var src = Path.Combine(Path.GetTempPath(), "pane-hostclip-src", "outfolder");
+        Directory.CreateDirectory(Path.Combine(src, "sub"));
+        var payload = new byte[300_000]; new Random(9).NextBytes(payload);
+        await File.WriteAllBytesAsync(Path.Combine(src, "sub", "b.bin"), payload);
+        ClipboardProbe.SetFiles(new[] { src });
+        bool began = false, echoed = false; string[]? names = null; long got2 = 0;
+        var tEnd = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < tEnd && names == null)
+        {
+            var m = await channel.ReceiveAsync(timeout);
+            if (m == null) break;
+            switch (Messages.TypeOf(m))
+            {
+                case MsgType.HostClipBegin: began = true; break;
+                case MsgType.FileChunk: got2 += m.Length - 1; break;
+                case MsgType.HostClipDone: names = Fs.ReadNames(m); break;
+                case MsgType.Clipboard: case MsgType.ClipboardImage: echoed = true; break;
+            }
+        }
+        try { Directory.Delete(Path.GetDirectoryName(src)!, true); } catch { }
+        bool backOk = began && names is { Length: 1 } && names[0] == "outfolder" && got2 == payload.Length && !echoed;
+        Console.WriteLine(backOk ? "PASS: folder copied on the host streamed to the client clipboard (no echo of our own pushes)."
+                                 : $"FAIL: host->client clip: began={began} names=[{string.Join(",", names ?? Array.Empty<string>())}] bytes={got2} echoed={echoed}.");
+
+        bool ok = textOk && filesOk && imgOk && backOk;
+        Console.WriteLine(); Console.WriteLine(ok ? "ALL PASS" : "FAILED");
+        return ok ? 0 : 1;
+    }
+
     if (handoffTest)
     {
         // Send two handoff files addressed relative to the profile; the host writes them under ITS

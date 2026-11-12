@@ -9,10 +9,13 @@ without built-in Remote Desktop. Encrypted, pairing-key gated, LAN auto-discover
 - .NET 8 SDK lives at `%LOCALAPPDATA%\Microsoft\dotnet\dotnet.exe` (not on PATH globally).
 
 ## Test
-`dotnet run --project tests/LoopbackTest -- 127.0.0.1 48901 <key>`  (start the host first)
+`dotnet run --project tests/LoopbackTest -- 127.0.0.1 48901 <key> [mode]`  (start the host first)
+Modes: (none)=JPEG+input, h264, monitor, clipboard (touches this PC's clipboard), audio (plays a quiet tone),
+files, handoff, measure. Running bin\ exes directly needs DOTNET_ROOT=%LOCALAPPDATA%\Microsoft\dotnet.
 
 ## Folder map
 - src/Pane.Protocol/ - shared wire protocol: SecureChannel (ECDH+AES-GCM), Messages, PairingKey, Discovery
+- src/Pane.Media/ - shared media: H264Encoder (MF, hardware-first) / H264Decoder, Nv12 conversion, Audio (WASAPI)
 - src/PaneHost/ - host: ScreenCapture (Desktop Duplication/Vortice), InputInjector (SendInput), Session, Installer
 - src/Pane/ - WPF client: MainWindow (tabs+intro), GridView (tiles), RemoteView (live screen+input), dialogs
 - src/PaneHostSetup/ - one-click installer that embeds the published host exe and runs it with --install
@@ -29,16 +32,16 @@ without built-in Remote Desktop. Encrypted, pairing-key gated, LAN auto-discover
 
 ## Status
 - Working end to end on loopback: handshake, JPEG frames, input, wrong-key rejection, 5s mouse soak all pass.
-- Frames are JPEG (protocol v2). Client auto-reconnects. Global keyboard hook forwards Win/Alt+Tab to the
+- Video is H.264 by default (protocol v3: hardware MF encoder, software fallback; JPEG tiles if either
+  side can't). Monitor picker, system audio, and clipboard sync (text/images/files) are in. `--connect`. Client auto-reconnects. Global keyboard hook forwards Win/Alt+Tab to the
   remote while a session tab is foreground (mouse is the escape hatch). Host is headless; setup is windowless
-  and shows the key in a dialog; installer sets UAC to auto-approve admin elevation. Primary monitor only.
+  and shows the key in a dialog; installer sets UAC to auto-approve admin elevation.
 - File transfer: drag files/folders onto the remote screen to send them to the other PC's
   Desktop\Pane Transfers; the "Files" panel browses the remote FS and downloads to Downloads\Pane Transfers.
   (Fs.cs protocol, FileService.cs on host; chunked 1 MiB streams.)
 - Handoff: drag a VS Code window onto Pane (WindowDragHook.cs) or the "Hand off" button -> push the project
   (rebased to each PC's user profile) + its Claude session (~/.claude/projects/<encoded>) and open VS Code
   on the other PC. Protocol HandoffFile/HandoffFinish; host rebases to its profile + launches code.cmd.
-- Clipboard: plain-text clipboard syncs both ways (MsgType.Clipboard; ClipboardSync.cs on host, timer in RemoteView).
 - Quality button in the session toolbar cycles Balanced / Sharp / Smooth (MsgType.SetQuality -> host JPEG quality).
 - Perf: JPEG frames decoded off the client UI thread; host adaptive quality + capture/encode pipelining; tall regions split into strips, JPEG
   encoded/decoded in parallel on both sides.

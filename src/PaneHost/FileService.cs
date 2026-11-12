@@ -14,6 +14,11 @@ public sealed class FileService
     private readonly SecureChannel _channel;
     private readonly CancellationToken _ct;
     private FileStream? _upload;
+    private string? _clipDir;                                // batch folder for an incoming clipboard copy
+    private readonly SemaphoreSlim _outgoing = new(1, 1);    // one host->client file stream at a time
+
+    /// <summary>Largest clipboard file copy we move automatically (bigger: drag onto the screen instead).</summary>
+    public const long MaxClipBytes = 512L * 1024 * 1024;
 
     public static string DropFolder
     {
@@ -56,6 +61,7 @@ public sealed class FileService
 
     public async Task DownloadAsync(string path)
     {
+        await _outgoing.WaitAsync(_ct);
         try
         {
             if (File.Exists(path))
@@ -76,6 +82,91 @@ public sealed class FileService
             await _channel.SendAsync(Fs.TransferDone(), _ct);
         }
         catch (Exception ex) { await Err(ex.Message); }
+        finally { _outgoing.Release(); }
+    }
+
+    // --- clipboard files ---
+
+    /// <summary>Send files/folders copied on this PC so the client can paste them.</summary>
+    public async Task SendClipFilesAsync(IReadOnlyList<string> paths)
+    {
+        await _outgoing.WaitAsync(_ct);
+        try
+        {
+            await _channel.SendAsync(Fs.HostClipBegin(), _ct);
+            var names = new List<string>();
+            foreach (var path in paths)
+            {
+                if (File.Exists(path))
+                {
+                    names.Add(Path.GetFileName(path));
+                    await SendFileAsync(path, Path.GetFileName(path));
+                }
+                else if (Directory.Exists(path))
+                {
+                    var baseName = new DirectoryInfo(path.TrimEnd('\\', '/')).Name;
+                    names.Add(baseName);
+                    foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                        await SendFileAsync(file, Path.Combine(baseName, Path.GetRelativePath(path, file)));
+                }
+            }
+            await _channel.SendAsync(Fs.HostClipDone(names), _ct);
+        }
+        catch (Exception ex) { Log.Info($"Clipboard file send failed: {ex.Message}"); }
+        finally { _outgoing.Release(); }
+    }
+
+    /// <summary>Total bytes of a set of files/folders (stops counting past the clipboard cap).</summary>
+    public static long MeasureBytes(IEnumerable<string> paths)
+    {
+        long total = 0;
+        foreach (var p in paths)
+        {
+            try
+            {
+                if (File.Exists(p)) total += new FileInfo(p).Length;
+                else if (Directory.Exists(p))
+                    foreach (var f in Directory.EnumerateFiles(p, "*", SearchOption.AllDirectories))
+                    {
+                        total += new FileInfo(f).Length;
+                        if (total > MaxClipBytes) return total;
+                    }
+            }
+            catch { }
+            if (total > MaxClipBytes) return total;
+        }
+        return total;
+    }
+
+    /// <summary>Begin one file of a clipboard copy from the client (into a fresh temp batch folder).</summary>
+    public void ClipFile(string relPath, long size)
+    {
+        CloseUpload();
+        try
+        {
+            _clipDir ??= Path.Combine(Path.GetTempPath(), "Pane Clipboard", DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));
+            var dest = Path.Combine(_clipDir, Sanitize(relPath));
+            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+            _upload = File.Create(dest);
+        }
+        catch (Exception ex) { Log.Info($"Clipboard file failed: {ex.Message}"); _upload = null; }
+    }
+
+    /// <summary>All clipboard files received: returns the full paths of the top-level items to put on the clipboard.</summary>
+    public List<string> ClipFilesDone(string[] topNames)
+    {
+        CloseUpload();
+        var result = new List<string>();
+        var dir = _clipDir;
+        _clipDir = null;
+        if (dir == null) return result;
+        foreach (var n in topNames)
+        {
+            var full = Path.Combine(dir, Sanitize(n));
+            if (File.Exists(full) || Directory.Exists(full)) result.Add(full);
+            else { try { Directory.CreateDirectory(full); result.Add(full); } catch { } } // empty folder
+        }
+        return result;
     }
 
     private async Task SendFileAsync(string fullPath, string relPath)
