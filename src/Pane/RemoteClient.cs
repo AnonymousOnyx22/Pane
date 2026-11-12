@@ -80,12 +80,8 @@ public sealed class RemoteClient : IDisposable
                     Interlocked.Increment(ref _frames);
                     Interlocked.Add(ref _bytes, msg.Length);
                     var rects = Messages.ReadFrame(msg);
-                    var decoded = new List<DecodedRect>(rects.Count);
-                    foreach (var r in rects)
-                    {
-                        var d = Decode(r);
-                        if (d.HasValue) decoded.Add(d.Value);
-                    }
+                    var decoded = rects.AsParallel().AsOrdered().Select(Decode)
+                        .Where(d => d.HasValue).Select(d => d!.Value).ToList();
                     if (decoded.Count > 0) FrameDecoded?.Invoke(decoded);
                     break;
                 }

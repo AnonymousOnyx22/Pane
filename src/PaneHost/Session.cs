@@ -80,7 +80,7 @@ public sealed class Session : IDisposable
 
             sending = Task.Run(async () =>
             {
-                var rects = raw.Select(ScreenCapture.Encode).ToList();
+                var rects = raw.AsParallel().AsOrdered().Select(ScreenCapture.Encode).ToList();
                 await channel.SendAsync(Messages.Frame(rects), ct);
             }, ct);
         }

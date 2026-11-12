@@ -50,7 +50,7 @@ public partial class RemoteView : UserControl, IDisposable
         _client?.Dispose();
         _client = new RemoteClient();
         _client.Connected += (w, h) => Dispatcher.Invoke(() => OnConnected(w, h));
-        _client.FrameDecoded += rects => Dispatcher.Invoke(() => OnFrame(rects));
+        _client.FrameDecoded += rects => Dispatcher.BeginInvoke(() => OnFrame(rects), System.Windows.Threading.DispatcherPriority.Send);
         _client.Disconnected += reason => Dispatcher.Invoke(() => OnDisconnected(reason));
         _client.DirListing += (path, entries) => Dispatcher.Invoke(() => OnDirListing(path, entries));
         _client.TransferStatus += s => Dispatcher.Invoke(() => ShowToast(s));

@@ -236,7 +236,19 @@ public sealed class ScreenCapture : IDisposable
                 // worker thread can pick the quality. Copied out of the GPU map, so the staging texture is
                 // free for the next capture the moment Unmap returns.
                 bool large = (long)w * h > (long)Width * Height / 4;
-                output.Add(new RawTile(x, y, w, h, packed, large));
+                // Split tall regions into horizontal strips so the caller can JPEG-encode them on several
+                // cores at once. A single GDI+ encode of a full screen is the main 60fps bottleneck.
+                int strips = h >= 256 ? Math.Min(Environment.ProcessorCount, Math.Min(8, h / 64)) : 1;
+                if (strips <= 1) { output.Add(new RawTile(x, y, w, h, packed, large)); continue; }
+                int baseH = h / strips;
+                for (int si = 0; si < strips; si++)
+                {
+                    int sy = si * baseH;
+                    int sh = si == strips - 1 ? h - sy : baseH;
+                    var part = new byte[rowBytes * sh];
+                    Buffer.BlockCopy(packed, sy * rowBytes, part, 0, part.Length);
+                    output.Add(new RawTile(x, y + sy, w, sh, part, large));
+                }
             }
         }
         finally { _context.Unmap(_staging, 0); }
