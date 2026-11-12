@@ -105,6 +105,8 @@ public sealed class Session : IDisposable
                     { var (dl, h, nx, ny) = Messages.ReadMouseWheel(msg); injector.MouseWheel(dl, h, nx, ny); break; }
                 case MsgType.Key:
                     { var (vk, d, ext) = Messages.ReadKey(msg); injector.Key(vk, d, ext); break; }
+                case MsgType.SetQuality:
+                    ScreenCapture.SetQuality(msg[1], msg[2]); break;
                 case MsgType.Clipboard:
                     clip.Apply(Messages.ReadClipboard(msg)); break;
                 case MsgType.RequestFullFrame:

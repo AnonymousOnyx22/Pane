@@ -266,8 +266,15 @@ public sealed class ScreenCapture : IDisposable
     // changes (dragging/maximizing a window) smooth instead of choking the link.
     private static readonly System.Drawing.Imaging.ImageCodecInfo JpegCodec =
         Array.Find(System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders(), c => c.FormatID == System.Drawing.Imaging.ImageFormat.Jpeg.Guid)!;
-    private static readonly System.Drawing.Imaging.EncoderParameters JpegHigh = MakeJpegParams(88L);
-    private static readonly System.Drawing.Imaging.EncoderParameters JpegLow = MakeJpegParams(60L);
+    private static volatile System.Drawing.Imaging.EncoderParameters JpegHigh = MakeJpegParams(88L);
+    private static volatile System.Drawing.Imaging.EncoderParameters JpegLow = MakeJpegParams(60L);
+
+    /// <summary>Client-chosen JPEG quality (1-100) for static and moving regions.</summary>
+    public static void SetQuality(int high, int low)
+    {
+        JpegHigh = MakeJpegParams(Math.Clamp(high, 10, 100));
+        JpegLow = MakeJpegParams(Math.Clamp(low, 10, 100));
+    }
 
     private static System.Drawing.Imaging.EncoderParameters MakeJpegParams(long quality)
     {

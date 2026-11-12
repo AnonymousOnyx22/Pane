@@ -155,6 +155,7 @@ public sealed class RemoteClient : IDisposable
     public void SendMouseButton(int button, bool down, float nx, float ny) => Send(Messages.MouseButton(button, down, nx, ny));
     public void SendMouseWheel(int delta, bool horizontal, float nx, float ny) => Send(Messages.MouseWheel(delta, horizontal, nx, ny));
     public void SendKey(ushort vk, bool down, bool extended) => Send(Messages.Key(vk, down, extended));
+    public void SendQuality(int high, int low) => Send(Messages.SetQuality(high, low));
     public void SendClipboard(string text) => Send(Messages.Clipboard(text));
     public void RequestFullFrame() => Send(Messages.RequestFullFrame());
 

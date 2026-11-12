@@ -107,6 +107,7 @@ public partial class RemoteView : UserControl, IDisposable
         Screen.Source = _bmp;
         Overlay.Visibility = Visibility.Collapsed;
         StartClipboardWatch();
+        if (_qualityIdx != 0) ApplyQuality(); // re-assert the chosen preset after a reconnect
         Focus();
     }
 
@@ -240,6 +241,26 @@ public partial class RemoteView : UserControl, IDisposable
         if (_client == null || string.IsNullOrEmpty(folder)) return;
         ShowToast("Handing off " + Path.GetFileName(folder.TrimEnd('\\', '/')) + "…");
         _ = _client.HandoffAsync(folder);
+    }
+
+    // --- quality preset ---
+
+    private static readonly (string Name, int High, int Low)[] QualityPresets =
+        { ("Balanced", 88, 60), ("Sharp", 96, 85), ("Smooth", 65, 40) };
+    private int _qualityIdx;
+
+    private void Quality_Click(object sender, RoutedEventArgs e)
+    {
+        _qualityIdx = (_qualityIdx + 1) % QualityPresets.Length;
+        ApplyQuality();
+    }
+
+    private void ApplyQuality()
+    {
+        var q = QualityPresets[_qualityIdx];
+        QualityBtn.Content = q.Name;
+        _client?.SendQuality(q.High, q.Low);
+        _client?.RequestFullFrame();
     }
 
     // --- stats overlay ---

@@ -18,6 +18,7 @@ public enum MsgType : byte
     MouseWheel = 22,  // int delta, byte horizontal(1/0), float nx, float ny
     Key = 23,         // ushort vk, byte down(1/0), byte extended(1/0)
     RequestFullFrame = 24,
+    SetQuality = 26,  // byte highQuality, byte lowQuality (JPEG 1-100) for static / moving regions
     Clipboard = 25,   // UTF-8 text (remainder of message). Sent in BOTH directions to sync the clipboard.
 
     // File transfer, Client -> Host
@@ -119,6 +120,8 @@ public static class Messages
     }
 
     public static string ReadClipboard(byte[] m) => Encoding.UTF8.GetString(m, 1, m.Length - 1);
+
+    public static byte[] SetQuality(int high, int low) => new[] { (byte)MsgType.SetQuality, (byte)high, (byte)low };
 
     public static byte[] RequestFullFrame() => new[] { (byte)MsgType.RequestFullFrame };
 

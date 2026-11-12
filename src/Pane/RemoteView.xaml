@@ -20,6 +20,9 @@
                 <Button x:Name="HandoffBtn" Content="Hand off" Style="{StaticResource GhostButton}"
                         Padding="12,5" Margin="0,0,8,0" Click="Handoff_Click"
                         ToolTip="Send a project (files + VS Code + Claude conversation) to this PC"/>
+                <Button x:Name="QualityBtn" Content="Balanced" Style="{StaticResource GhostButton}"
+                        Padding="12,5" Margin="0,0,8,0" Click="Quality_Click"
+                        ToolTip="Image quality: Smooth (fastest) / Balanced / Sharp (best looking)"/>
                 <Button x:Name="StatsToggle" Content="fps" Style="{StaticResource GhostButton}"
                         Padding="12,5" Margin="0,0,8,0" Click="StatsToggle_Click"/>
                 <Button x:Name="FilesToggle" Content="Files" Style="{StaticResource GhostButton}"
