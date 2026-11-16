@@ -57,9 +57,9 @@ public sealed class SecureChannel : IDisposable
 
         if (isClient)
         {
-            await WriteRawAsync(s, myPub, ct);
+            await WriteRawAsync(s, myPub, ct).ConfigureAwait(false);
             clientPub = myPub;
-            var serverMsg = await ReadRawAsync(s, ct);
+            var serverMsg = await ReadRawAsync(s, ct).ConfigureAwait(false);
             if (serverMsg.Length <= 32) throw new IOException("Bad server hello.");
             int pubLen = serverMsg.Length - 32;
             serverPub = serverMsg[..pubLen];
@@ -67,17 +67,17 @@ public sealed class SecureChannel : IDisposable
             var expected = Hmac(pairingKey, clientPub, serverPub);
             if (!CryptographicOperations.FixedTimeEquals(serverAuth, expected))
                 throw new CryptographicException("Host rejected: wrong pairing key.");
-            await WriteRawAsync(s, Hmac(pairingKey, serverPub, clientPub), ct);
+            await WriteRawAsync(s, Hmac(pairingKey, serverPub, clientPub), ct).ConfigureAwait(false);
         }
         else
         {
-            clientPub = await ReadRawAsync(s, ct);
+            clientPub = await ReadRawAsync(s, ct).ConfigureAwait(false);
             serverPub = myPub;
             var hello = new byte[serverPub.Length + 32];
             Buffer.BlockCopy(serverPub, 0, hello, 0, serverPub.Length);
             Buffer.BlockCopy(Hmac(pairingKey, clientPub, serverPub), 0, hello, serverPub.Length, 32);
-            await WriteRawAsync(s, hello, ct);
-            var clientAuth = await ReadRawAsync(s, ct);
+            await WriteRawAsync(s, hello, ct).ConfigureAwait(false);
+            var clientAuth = await ReadRawAsync(s, ct).ConfigureAwait(false);
             var expected = Hmac(pairingKey, serverPub, clientPub);
             if (clientAuth.Length != 32 || !CryptographicOperations.FixedTimeEquals(clientAuth, expected))
                 throw new CryptographicException("Client failed pairing-key authentication.");
@@ -104,7 +104,7 @@ public sealed class SecureChannel : IDisposable
 
     public async Task SendAsync(ReadOnlyMemory<byte> plaintext, CancellationToken ct)
     {
-        await _sendLock.WaitAsync(ct);
+        await _sendLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             var nonce = new byte[NonceSize];
@@ -117,8 +117,8 @@ public sealed class SecureChannel : IDisposable
             BinaryPrimitives.WriteInt32BigEndian(frame, cipher.Length + TagSize);
             Buffer.BlockCopy(cipher, 0, frame, 4, cipher.Length);
             Buffer.BlockCopy(tag, 0, frame, 4 + cipher.Length, TagSize);
-            await _stream.WriteAsync(frame, ct);
-            await _stream.FlushAsync(ct);
+            await _stream.WriteAsync(frame, ct).ConfigureAwait(false);
+            await _stream.FlushAsync(ct).ConfigureAwait(false);
         }
         finally { _sendLock.Release(); }
     }
@@ -127,12 +127,12 @@ public sealed class SecureChannel : IDisposable
     public async Task<byte[]?> ReceiveAsync(CancellationToken ct)
     {
         var lenBuf = new byte[4];
-        if (!await ReadFullAsync(_stream, lenBuf, ct)) return null;
+        if (!await ReadFullAsync(_stream, lenBuf, ct).ConfigureAwait(false)) return null;
         int len = BinaryPrimitives.ReadInt32BigEndian(lenBuf);
         if (len < TagSize || len > MaxFrame) throw new IOException($"Bad frame length {len}.");
 
         var frame = new byte[len];
-        if (!await ReadFullAsync(_stream, frame, ct)) throw new EndOfStreamException();
+        if (!await ReadFullAsync(_stream, frame, ct).ConfigureAwait(false)) throw new EndOfStreamException();
         int cipherLen = len - TagSize;
         var nonce = new byte[NonceSize];
         BinaryPrimitives.WriteUInt64BigEndian(nonce.AsSpan(4), _recvCounter++);
@@ -145,19 +145,19 @@ public sealed class SecureChannel : IDisposable
     {
         var len = new byte[4];
         BinaryPrimitives.WriteInt32BigEndian(len, data.Length);
-        await s.WriteAsync(len, ct);
-        await s.WriteAsync(data, ct);
-        await s.FlushAsync(ct);
+        await s.WriteAsync(len, ct).ConfigureAwait(false);
+        await s.WriteAsync(data, ct).ConfigureAwait(false);
+        await s.FlushAsync(ct).ConfigureAwait(false);
     }
 
     private static async Task<byte[]> ReadRawAsync(Stream s, CancellationToken ct)
     {
         var lenBuf = new byte[4];
-        if (!await ReadFullAsync(s, lenBuf, ct)) throw new EndOfStreamException();
+        if (!await ReadFullAsync(s, lenBuf, ct).ConfigureAwait(false)) throw new EndOfStreamException();
         int len = BinaryPrimitives.ReadInt32BigEndian(lenBuf);
         if (len < 0 || len > 4096) throw new IOException("Bad handshake frame.");
         var buf = new byte[len];
-        if (!await ReadFullAsync(s, buf, ct)) throw new EndOfStreamException();
+        if (!await ReadFullAsync(s, buf, ct).ConfigureAwait(false)) throw new EndOfStreamException();
         return buf;
     }
 
@@ -166,7 +166,7 @@ public sealed class SecureChannel : IDisposable
         int off = 0;
         while (off < buf.Length)
         {
-            int n = await s.ReadAsync(buf.AsMemory(off), ct);
+            int n = await s.ReadAsync(buf.AsMemory(off), ct).ConfigureAwait(false);
             if (n == 0) return off == 0 ? false : throw new EndOfStreamException();
             off += n;
         }

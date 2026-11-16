@@ -55,23 +55,24 @@ public partial class RemoteView : UserControl, IDisposable
         }
 
         _client?.Dispose();
+        ClearPendingFrames();
         var client = new RemoteClient { StartWithAudio = _soundOn };
         _client = client;
         _client.Connected += (w, h) => Dispatcher.Invoke(() => OnConnected(w, h));
-        _client.FrameDecoded += rects => Dispatcher.BeginInvoke(() => OnFrame(client, rects), DispatcherPriority.Send);
+        _client.FrameDecoded += rects => EnqueueFrame(client, rects);
         // Invoke (not BeginInvoke) so the bitmap is resized before any frame of the new size is queued.
         _client.ScreenChanged += (w, h) => Dispatcher.Invoke(() => ResizeScreen(w, h));
         _client.MonitorsChanged += (mons, cur) => Dispatcher.BeginInvoke(() => OnMonitors(mons, cur));
         _client.CodecChanged += name => Dispatcher.BeginInvoke(() => _codecName = name);
         _client.ClipboardImageReceived += png => Dispatcher.BeginInvoke(() => SetClipboardImage(png));
         _client.ClipboardFilesReceived += paths => Dispatcher.BeginInvoke(() => SetClipboardFiles(paths));
-        _client.Disconnected += reason => Dispatcher.Invoke(() => OnDisconnected(reason));
-        _client.DirListing += (path, entries) => Dispatcher.Invoke(() => OnDirListing(path, entries));
+        _client.Disconnected += reason => Dispatcher.BeginInvoke(() => OnDisconnected(reason));
+        _client.DirListing += (path, entries) => Dispatcher.BeginInvoke(() => OnDirListing(path, entries));
         _client.ClipboardReceived += t => Dispatcher.BeginInvoke(() =>
         {
             try { Clipboard.SetText(t); _clipSeq = GetClipboardSequenceNumber(); } catch { }
         });
-        _client.TransferStatus += s => Dispatcher.Invoke(() => ShowToast(s));
+        _client.TransferStatus += s => Dispatcher.BeginInvoke(() => ShowToast(s));
         _client.Start(string.IsNullOrWhiteSpace(_pc.Host) ? _pc.Id : _pc.Host, Net.TcpPort, key);
     }
 
@@ -222,6 +223,7 @@ public partial class RemoteView : UserControl, IDisposable
     private void ResizeScreen(int w, int h)
     {
         if (w <= 0 || h <= 0 || (w == _w && h == _h && _bmp != null)) return;
+        ClearPendingFrames();
         _w = w; _h = h;
         _bmp = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
         Screen.Source = _bmp;
@@ -230,6 +232,7 @@ public partial class RemoteView : UserControl, IDisposable
     private void OnDisconnected(string reason)
     {
         if (_closed) return;
+        ClearPendingFrames();
         // Auto-reconnect: keep retrying every 2s. The manual button is still there as a nudge.
         ShowStatus("Connection lost — reconnecting…", true);
         _reconnectTimer.Stop();
@@ -238,6 +241,7 @@ public partial class RemoteView : UserControl, IDisposable
 
     private void OnConnected(int w, int h)
     {
+        ClearPendingFrames();
         _w = w; _h = h;
         _bmp = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
         Screen.Source = _bmp;
@@ -247,22 +251,135 @@ public partial class RemoteView : UserControl, IDisposable
         Focus();
     }
 
-    private void OnFrame(RemoteClient client, List<DecodedRect> rects)
+    private readonly object _frameLock = new();
+    private readonly List<(RemoteClient Client, DecodedRect Rect)> _pendingRects = new();
+    private bool _flushScheduled;
+
+    private void ClearPendingFrames()
     {
-        // Pixels are already decoded off-thread; this is just a fast memcpy into the bitmap.
-        foreach (var r in rects)
+        lock (_frameLock)
         {
-            if (_bmp != null && r.X + r.W <= _w && r.Y + r.H <= _h)
+            foreach (var (c, r) in _pendingRects)
+                if (r.Pooled) c.Recycle(r);
+            _pendingRects.Clear();
+        }
+        _client?.ResetBacklog();
+    }
+
+    /// <summary>True when <paramref name="rects"/> is a single rect or a vertical stack of contiguous strips
+    /// covering one solid rectangle (covX, covY)..(covR, covB).</summary>
+    private static bool TryGetCoveredRect(List<DecodedRect> rects, out int covX, out int covY, out int covR, out int covB)
+    {
+        covX = covY = covR = covB = 0;
+        if (rects.Count == 0) return false;
+        var first = rects[0];
+        covX = first.X;
+        covY = first.Y;
+        covR = first.X + first.W;
+        covB = first.Y + first.H;
+        for (int i = 1; i < rects.Count; i++)
+        {
+            var r = rects[i];
+            if (r.X != covX || r.X + r.W != covR || r.Y != covB)
+                return false;
+            covB = r.Y + r.H;
+        }
+        return true;
+    }
+
+    private void EnqueueFrame(RemoteClient client, List<DecodedRect> rects)
+    {
+        if (_closed || rects.Count == 0)
+        {
+            foreach (var r in rects) if (r.Pooled) client.Recycle(r);
+            client.ReleaseBacklog();
+            return;
+        }
+
+        bool hasCover = TryGetCoveredRect(rects, out int covX, out int covY, out int covR, out int covB);
+        bool schedule = false;
+        lock (_frameLock)
+        {
+            if (hasCover && _pendingRects.Count > 0)
             {
-                try { _bmp.WritePixels(new Int32Rect(r.X, r.Y, r.W, r.H), r.Bgra, r.Stride, 0); }
-                catch { /* next full frame heals it */ }
+                int sw = _w, sh = _h;
+                if (sw > 0 && sh > 0 && covX <= 0 && covY <= 0 && covR >= sw && covB >= sh)
+                {
+                    foreach (var (c, old) in _pendingRects)
+                        if (old.Pooled) c.Recycle(old);
+                    _pendingRects.Clear();
+                }
+                else
+                {
+                    for (int i = _pendingRects.Count - 1; i >= 0; i--)
+                    {
+                        var (c, old) = _pendingRects[i];
+                        if (old.X >= covX && old.Y >= covY && old.X + old.W <= covR && old.Y + old.H <= covB)
+                        {
+                            if (old.Pooled) c.Recycle(old);
+                            _pendingRects.RemoveAt(i);
+                        }
+                    }
+                }
             }
-            if (r.Pooled)
+
+            foreach (var r in rects)
+                _pendingRects.Add((client, r));
+
+            if (!_flushScheduled)
             {
-                System.Threading.Interlocked.Decrement(ref client.UiBacklog);
-                client.Recycle(r);
+                _flushScheduled = true;
+                schedule = true;
             }
         }
+
+        if (schedule)
+            Dispatcher.BeginInvoke(FlushFrames, DispatcherPriority.Render);
+    }
+
+    private void FlushFrames()
+    {
+        List<(RemoteClient Client, DecodedRect Rect)> batch;
+        lock (_frameLock)
+        {
+            if (_pendingRects.Count == 0)
+            {
+                _flushScheduled = false;
+                _client?.ResetBacklog();
+                return;
+            }
+            batch = new List<(RemoteClient, DecodedRect)>(_pendingRects);
+            _pendingRects.Clear();
+            _flushScheduled = false;
+        }
+
+        if (_bmp != null)
+        {
+            _bmp.Lock();
+            try
+            {
+                foreach (var (_, r) in batch)
+                {
+                    if (r.X >= 0 && r.Y >= 0 && r.X + r.W <= _w && r.Y + r.H <= _h)
+                    {
+                        try { _bmp.WritePixels(new Int32Rect(r.X, r.Y, r.W, r.H), r.Bgra, r.Stride, 0); }
+                        catch { /* next full frame heals it */ }
+                    }
+                }
+            }
+            finally
+            {
+                _bmp.Unlock();
+            }
+        }
+
+        RemoteClient? lastClient = null;
+        foreach (var (c, r) in batch)
+        {
+            if (r.Pooled) c.Recycle(r);
+            lastClient = c;
+        }
+        lastClient?.ResetBacklog();
     }
 
     // --- status overlay ---
@@ -541,8 +658,10 @@ public partial class RemoteView : UserControl, IDisposable
     {
         _closed = true;
         _reconnectTimer.Stop();
+        _clipTimer?.Stop();
         _toastTimer?.Stop();
         _statsTimer?.Stop();
         _client?.Dispose();
+        ClearPendingFrames();
     }
 }

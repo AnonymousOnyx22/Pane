@@ -109,7 +109,7 @@ public sealed class H264Encoder : IDisposable
         Mf.SetCodecValue(mft, Mf.AVEncCommonMeanBitRate, (uint)bitrate);
         Mf.SetCodecValue(mft, Mf.AVEncMPVDefaultBPictureCount, 0u);
         Mf.SetCodecValue(mft, Mf.AVEncMPVGOPSize, (uint)(_fps * 10));
-        Mf.SetCodecValue(mft, Mf.AVEncCommonQualityVsSpeed, 50u);
+        Mf.SetCodecValue(mft, Mf.AVEncCommonQualityVsSpeed, 0u);
 
         using (var outType = MediaFactory.MFCreateMediaType())
         {
@@ -203,8 +203,8 @@ public sealed class H264Encoder : IDisposable
             if (_async)
             {
                 _mft.ProcessInput(0, sample, 0);
-                // Low-latency hardware encoders return this frame's output within a few ms.
-                if (_outputs.TryTake(out var au, 60)) result.Add(au);
+                // Low-latency hardware encoders return this frame's output within a few ms (first frame can take longer during GPU init).
+                if (_outputs.TryTake(out var au, _frame == 1 ? 250 : 60)) result.Add(au);
                 while (_outputs.TryTake(out var more)) result.Add(more);
             }
             else

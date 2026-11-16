@@ -31,6 +31,8 @@ public sealed class Session : IDisposable
     {
         Log.Info($"Client connecting from {_remote}");
         _client.NoDelay = true;
+        _client.SendBufferSize = 256 * 1024;
+        _client.ReceiveBufferSize = 64 * 1024;
         using var stream = _client.GetStream();
 
         SecureChannel channel;
@@ -163,7 +165,7 @@ public sealed class Session : IDisposable
                         continue;
                     }
 
-                    if (got) { haveFrame = true; refresh = 30; }
+                    if (got) { haveFrame = true; refresh = 3; }
                     else if (refresh > 0 && haveFrame) refresh--;   // re-encode the still image so it sharpens
                     else continue;
 

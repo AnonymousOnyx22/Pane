@@ -51,9 +51,13 @@ public sealed class RemoteClient : IDisposable
     private bool _h264Failed;
     private volatile int _w, _h;
     private readonly System.Collections.Concurrent.ConcurrentQueue<byte[]> _framePool = new();
-    /// <summary>Frames handed to the UI but not drawn yet. Video frames are skipped (not queued) when
-    /// the UI falls behind, so latency never builds up.</summary>
+    private readonly ManualResetEventSlim _uiFlushed = new(true);
+    /// <summary>Frame batches handed to the UI but not drawn yet.</summary>
     public int UiBacklog;
+
+    // Coalesced mouse move state so rapid cursor motion never queues stale moves behind the send lock.
+    private volatile float _moveX, _moveY;
+    private int _movePending;
 
     // Audio
     private readonly AudioPlayer _audio = new();
@@ -67,15 +71,22 @@ public sealed class RemoteClient : IDisposable
     public long TotalFrames => Interlocked.Read(ref _frames);
     public long TotalBytes => Interlocked.Read(ref _bytes);
 
-    public async void Start(string host, int port, byte[] key)
+    public void Start(string host, int port, byte[] key) => _ = Task.Run(() => RunAsync(host, port, key));
+
+    private async Task RunAsync(string host, int port, byte[] key)
     {
         try
         {
-            _tcp = new TcpClient { NoDelay = true };
-            await _tcp.ConnectAsync(host, port, _cts.Token);
-            _channel = await SecureChannel.ClientHandshakeAsync(_tcp.GetStream(), key, _cts.Token);
+            _tcp = new TcpClient
+            {
+                NoDelay = true,
+                ReceiveBufferSize = 256 * 1024,
+                SendBufferSize = 64 * 1024
+            };
+            await _tcp.ConnectAsync(host, port, _cts.Token).ConfigureAwait(false);
+            _channel = await SecureChannel.ClientHandshakeAsync(_tcp.GetStream(), key, _cts.Token).ConfigureAwait(false);
 
-            var first = await _channel.ReceiveAsync(_cts.Token);
+            var first = await _channel.ReceiveAsync(_cts.Token).ConfigureAwait(false);
             if (first == null || Messages.TypeOf(first) != MsgType.ScreenInfo)
                 throw new Exception("Host did not send screen info.");
             var (w, h) = Messages.ReadScreenInfo(first);
@@ -93,7 +104,7 @@ public sealed class RemoteClient : IDisposable
 
             while (!_cts.IsCancellationRequested)
             {
-                var msg = await _channel.ReceiveAsync(_cts.Token);
+                var msg = await _channel.ReceiveAsync(_cts.Token).ConfigureAwait(false);
                 if (msg == null) break;
                 Handle(msg);
             }
@@ -109,14 +120,22 @@ public sealed class RemoteClient : IDisposable
         {
             case MsgType.Frame:
                 {
-                    // Decode JPEG here on the receive thread. Only the cheap WritePixels then runs on the UI
-                    // thread, so WPF's compositor stays free to animate at 60fps instead of being saturated.
+                    // Decode JPEG here on the background receive thread. Only the cheap WritePixels then runs
+                    // on the UI thread, so WPF's compositor stays free to animate at 60fps.
                     Interlocked.Increment(ref _frames);
                     Interlocked.Add(ref _bytes, msg.Length);
+                    if (Volatile.Read(ref UiBacklog) >= 2)
+                        _uiFlushed.Wait(12, _cts.Token);
                     var rects = Messages.ReadFrame(msg);
-                    var decoded = rects.AsParallel().AsOrdered().Select(Decode)
-                        .Where(d => d.HasValue).Select(d => d!.Value).ToList();
-                    if (decoded.Count > 0) FrameDecoded?.Invoke(decoded);
+                    var decoded = rects.Count == 1
+                        ? (Decode(rects[0]) is { } d0 ? new List<DecodedRect> { d0 } : new List<DecodedRect>())
+                        : rects.AsParallel().AsOrdered().Select(Decode)
+                            .Where(d => d.HasValue).Select(d => d!.Value).ToList();
+                    if (decoded.Count > 0)
+                    {
+                        if (Interlocked.Increment(ref UiBacklog) >= 2) _uiFlushed.Reset();
+                        FrameDecoded?.Invoke(decoded);
+                    }
                     break;
                 }
             case MsgType.VideoFrame:
@@ -233,8 +252,8 @@ public sealed class RemoteClient : IDisposable
         return name;
     }
 
-    /// <summary>Decode one H.264 access unit (always, to keep the decoder's reference frames intact) and,
-    /// unless the UI is behind, convert it to BGRA and hand it over.</summary>
+    /// <summary>Decode one H.264 access unit (always, to keep the decoder's reference frames intact) and
+    /// convert it to BGRA for the UI. Any unrendered older frame on the UI queue is replaced in-place.</summary>
     private unsafe void DecodeVideo(byte[] msg)
     {
         var dec = _decoder;
@@ -244,13 +263,13 @@ public sealed class RemoteClient : IDisposable
         {
             dec.Decode(msg, 1, msg.Length - 1, (p, stride, planeH, pw, ph) =>
             {
-                if (Volatile.Read(ref UiBacklog) >= 2) return; // UI behind: drop this picture, never queue
+                if (Volatile.Read(ref UiBacklog) >= 3) return; // safety valve if UI is completely blocked
                 int cw = Math.Min(w, pw), chh = Math.Min(h, ph);
                 if (cw <= 0 || chh <= 0) return;
                 int need = cw * chh * 4;
                 if (!_framePool.TryDequeue(out var buf) || buf.Length != need) buf = new byte[need];
                 Nv12.ToBgra(p, stride, planeH, cw, chh, buf);
-                Interlocked.Increment(ref UiBacklog);
+                if (Interlocked.Increment(ref UiBacklog) >= 2) _uiFlushed.Reset();
                 FrameDecoded?.Invoke(new List<DecodedRect> { new(0, 0, cw, chh, buf, cw * 4, Pooled: true) });
             });
         }
@@ -264,10 +283,23 @@ public sealed class RemoteClient : IDisposable
         }
     }
 
-    /// <summary>Return a full-frame buffer once the UI has copied it.</summary>
+    /// <summary>Return a full-frame buffer once the UI has copied or superseded it.</summary>
     public void Recycle(DecodedRect r)
     {
         if (r.Pooled && _framePool.Count < 4) _framePool.Enqueue(r.Bgra);
+    }
+
+    /// <summary>Called by the UI when a pending full-screen frame is superseded or when a batch finishes rendering.</summary>
+    public void ReleaseBacklog(int count = 1)
+    {
+        if (Interlocked.Add(ref UiBacklog, -count) < 2)
+            _uiFlushed.Set();
+    }
+
+    public void ResetBacklog()
+    {
+        Interlocked.Exchange(ref UiBacklog, 0);
+        _uiFlushed.Set();
     }
 
     public void SelectMonitor(int index) => Send(Messages.SelectMonitor(index));
@@ -341,15 +373,34 @@ public sealed class RemoteClient : IDisposable
         Disconnected?.Invoke(reason);
     }
 
-    private async void Send(byte[] msg)
+    private void Send(byte[] msg) => _ = SendCoreAsync(msg);
+
+    private async Task SendCoreAsync(byte[] msg)
     {
         var ch = _channel;
         if (ch == null || _cts.IsCancellationRequested) return;
-        try { await ch.SendAsync(msg, _cts.Token); }
+        try { await ch.SendAsync(msg, _cts.Token).ConfigureAwait(false); }
         catch { Fail("Send failed."); }
     }
 
-    public void SendMouseMove(float nx, float ny) => Send(Messages.MouseMove(nx, ny));
+    public void SendMouseMove(float nx, float ny)
+    {
+        _moveX = nx;
+        _moveY = ny;
+        if (Interlocked.Exchange(ref _movePending, 1) == 0)
+            _ = FlushMouseMoveAsync();
+    }
+
+    private async Task FlushMouseMoveAsync()
+    {
+        while (Interlocked.Exchange(ref _movePending, 0) == 1)
+        {
+            var ch = _channel;
+            if (ch == null || _cts.IsCancellationRequested) return;
+            try { await ch.SendAsync(Messages.MouseMove(_moveX, _moveY), _cts.Token).ConfigureAwait(false); }
+            catch { Fail("Send failed."); return; }
+        }
+    }
     public void SendMouseButton(int button, bool down, float nx, float ny) => Send(Messages.MouseButton(button, down, nx, ny));
     public void SendMouseWheel(int delta, bool horizontal, float nx, float ny) => Send(Messages.MouseWheel(delta, horizontal, nx, ny));
     public void SendKey(ushort vk, bool down, bool extended) => Send(Messages.Key(vk, down, extended));
@@ -487,6 +538,7 @@ public sealed class RemoteClient : IDisposable
     {
         _down = true;
         try { _cts.Cancel(); } catch { }
+        try { _uiFlushed.Set(); } catch { }
         try { _dlStream?.Dispose(); } catch { }
         try { _decoder?.Dispose(); } catch { }
         _decoder = null;
@@ -494,5 +546,6 @@ public sealed class RemoteClient : IDisposable
         _channel?.Dispose();
         _tcp?.Dispose();
         _cts.Dispose();
+        _uiFlushed.Dispose();
     }
 }

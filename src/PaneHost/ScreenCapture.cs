@@ -174,35 +174,52 @@ public sealed class ScreenCapture : IDisposable
     public bool CaptureFull(int timeoutMs, Action<IntPtr, int> consume)
     {
         if (!EnsureReady()) return false;
+        long deadline = Environment.TickCount64 + Math.Max(1, timeoutMs);
         try
         {
-            var result = _dupl.AcquireNextFrame((uint)timeoutMs, out var frameInfo, out var desktopResource);
-            if (result == Vortice.DXGI.ResultCode.WaitTimeout)
+            while (true)
             {
-                if (_needFullFrame && _haveStaging) { _needFullFrame = false; MapAndConsume(consume); return true; }
-                return false;
-            }
-            if (result == Vortice.DXGI.ResultCode.AccessLost) { _needReinit = true; return false; }
-            result.CheckError();
-            try
-            {
-                bool hasNewImage = desktopResource != null && frameInfo.LastPresentTime != 0;
-                if (!hasNewImage)
+                int rem = (int)Math.Max(0, deadline - Environment.TickCount64);
+                var result = _dupl.AcquireNextFrame((uint)rem, out var frameInfo, out var desktopResource);
+                if (result == Vortice.DXGI.ResultCode.WaitTimeout)
                 {
                     if (_needFullFrame && _haveStaging) { _needFullFrame = false; MapAndConsume(consume); return true; }
                     return false;
                 }
-                using var tex = desktopResource!.QueryInterface<ID3D11Texture2D>();
-                _context.CopyResource(_staging, tex);
-                _haveStaging = true;
-                _needFullFrame = false;
-                MapAndConsume(consume);
-                return true;
-            }
-            finally
-            {
-                desktopResource?.Dispose();
-                _dupl.ReleaseFrame();
+                if (result == Vortice.DXGI.ResultCode.AccessLost) { _needReinit = true; return false; }
+                result.CheckError();
+
+                bool copied = false;
+                try
+                {
+                    bool hasNewImage = desktopResource != null && frameInfo.LastPresentTime != 0;
+                    if (hasNewImage)
+                    {
+                        using var tex = desktopResource!.QueryInterface<ID3D11Texture2D>();
+                        _context.CopyResource(_staging, tex);
+                        _haveStaging = true;
+                        _needFullFrame = false;
+                        copied = true;
+                    }
+                }
+                finally
+                {
+                    desktopResource?.Dispose();
+                    _dupl.ReleaseFrame();
+                }
+
+                if (copied)
+                {
+                    MapAndConsume(consume);
+                    return true;
+                }
+                if (_needFullFrame && _haveStaging)
+                {
+                    _needFullFrame = false;
+                    MapAndConsume(consume);
+                    return true;
+                }
+                if (Environment.TickCount64 >= deadline) return false;
             }
         }
         catch (Exception)
@@ -230,65 +247,75 @@ public sealed class ScreenCapture : IDisposable
         // monitor switch. While the secure desktop is up we return no changes and the client holds its
         // last frame; capture resumes automatically when the normal desktop returns.
         if (!EnsureReady()) return new List<RawTile>();
+        long deadline = Environment.TickCount64 + Math.Max(1, timeoutMs);
 
         try
         {
-        var result = _dupl.AcquireNextFrame((uint)timeoutMs, out var frameInfo, out var desktopResource);
-        if (result == Vortice.DXGI.ResultCode.WaitTimeout)
-        {
-            // Idle screen but a full frame was requested: resend the last image we have.
-            if (_needFullFrame && _haveStaging)
+            while (true)
             {
-                _needFullFrame = false;
-                return ExtractRaw(new List<Vortice.RawRect> { new(0, 0, Width, Height) });
+                int rem = (int)Math.Max(0, deadline - Environment.TickCount64);
+                var result = _dupl.AcquireNextFrame((uint)rem, out var frameInfo, out var desktopResource);
+                if (result == Vortice.DXGI.ResultCode.WaitTimeout)
+                {
+                    // Idle screen but a full frame was requested: resend the last image we have.
+                    if (_needFullFrame && _haveStaging)
+                    {
+                        _needFullFrame = false;
+                        return ExtractRaw(new List<Vortice.RawRect> { new(0, 0, Width, Height) });
+                    }
+                    return new List<RawTile>();
+                }
+                if (result == Vortice.DXGI.ResultCode.AccessLost)
+                {
+                    _needReinit = true;
+                    return new List<RawTile>();
+                }
+                result.CheckError();
+
+                List<Vortice.RawRect>? rects = null;
+                try
+                {
+                    // A cursor-only update (mouse moved but the desktop image is unchanged) returns success with
+                    // no usable desktop image: LastPresentTime == 0, and the resource may be null.
+                    bool hasNewImage = desktopResource != null && frameInfo.LastPresentTime != 0;
+                    if (hasNewImage)
+                    {
+                        using var tex = desktopResource!.QueryInterface<ID3D11Texture2D>();
+                        _context.CopyResource(_staging, tex);
+                        _haveStaging = true;
+
+                        rects = new List<Vortice.RawRect>();
+                        if (_needFullFrame)
+                        {
+                            rects.Add(new Vortice.RawRect(0, 0, Width, Height));
+                            _needFullFrame = false;
+                        }
+                        else
+                        {
+                            CollectDirtyRects(frameInfo, rects);
+                            // Many rects (e.g. dragging a window) are cheaper and smoother to send as one region
+                            // than as dozens of tiny JPEGs.
+                            if (rects.Count > 8)
+                                rects = new List<Vortice.RawRect> { BoundingBox(rects) };
+                        }
+                    }
+                }
+                finally
+                {
+                    desktopResource?.Dispose();
+                    _dupl.ReleaseFrame();
+                }
+
+                if (rects != null)
+                    return rects.Count == 0 ? new List<RawTile>() : ExtractRaw(rects);
+
+                if (_needFullFrame && _haveStaging)
+                {
+                    _needFullFrame = false;
+                    return ExtractRaw(new List<Vortice.RawRect> { new(0, 0, Width, Height) });
+                }
+                if (Environment.TickCount64 >= deadline) return new List<RawTile>();
             }
-            return new List<RawTile>();
-        }
-        if (result == Vortice.DXGI.ResultCode.AccessLost)
-        {
-            _needReinit = true;
-            return new List<RawTile>();
-        }
-        result.CheckError();
-
-        try
-        {
-            // A cursor-only update (mouse moved but the desktop image is unchanged) returns success with
-            // no usable desktop image: LastPresentTime == 0, and the resource may be null. There is nothing
-            // new to send, so skip it. Without this guard, dereferencing the resource threw NullReference.
-            bool hasNewImage = desktopResource != null && frameInfo.LastPresentTime != 0;
-            if (!hasNewImage && !_needFullFrame)
-                return new List<RawTile>();
-            if (desktopResource == null)
-                return new List<RawTile>();
-
-            using var tex = desktopResource.QueryInterface<ID3D11Texture2D>();
-            _context.CopyResource(_staging, tex);
-            _haveStaging = true;
-
-            var rects = new List<Vortice.RawRect>();
-            if (_needFullFrame)
-            {
-                rects.Add(new Vortice.RawRect(0, 0, Width, Height));
-                _needFullFrame = false;
-            }
-            else
-            {
-                CollectDirtyRects(frameInfo, rects);
-                if (rects.Count == 0) return new List<RawTile>();
-                // Many rects (e.g. dragging a window) are cheaper and smoother to send as one region
-                // than as dozens of tiny JPEGs.
-                if (rects.Count > 8)
-                    rects = new List<Vortice.RawRect> { BoundingBox(rects) };
-            }
-
-            return ExtractRaw(rects);
-        }
-        finally
-        {
-            desktopResource?.Dispose();
-            _dupl.ReleaseFrame();
-        }
         }
         catch (Exception)
         {
