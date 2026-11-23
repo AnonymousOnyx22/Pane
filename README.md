@@ -7,6 +7,9 @@
 <p align="center"><b>A minimal black-and-white remote desktop for Windows.</b><br/>
 Two tiny apps that are entirely yours — encrypted, pairing-key gated, and LAN-only.</p>
 
+<p align="center"><a href="https://github.com/AnonymousOnyx22/Pane/releases/latest"><b>⬇ Download the latest release</b></a><br/>
+<code>PaneHostSetup.exe</code> on the PC you want to control · <code>Pane.exe</code> on the PC you sit at</p>
+
 <p align="center">
   <img alt=".NET 8" src="https://img.shields.io/badge/.NET-8.0-111111">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%20|%2011-111111">
