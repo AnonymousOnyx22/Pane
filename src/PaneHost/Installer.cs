@@ -62,7 +62,9 @@ public static class Installer
         Run("netsh", "advfirewall firewall delete rule name=\"Pane Host UDP\"");
         Run("netsh", $"advfirewall firewall add rule name=\"Pane Host TCP\" dir=in action=allow protocol=TCP localport={Net.TcpPort}");
         Run("netsh", $"advfirewall firewall add rule name=\"Pane Host UDP\" dir=in action=allow protocol=UDP localport={Net.DiscoveryPort}");
-        Console.WriteLine($"  Firewall opened for TCP {Net.TcpPort} and UDP {Net.DiscoveryPort}.");
+        Run("netsh", "advfirewall firewall delete rule name=\"Pane Host Pairing\"");
+        Run("netsh", $"advfirewall firewall add rule name=\"Pane Host Pairing\" dir=in action=allow protocol=TCP localport={Net.PairPort}");
+        Console.WriteLine($"  Firewall opened for TCP {Net.TcpPort}, {Net.PairPort} and UDP {Net.DiscoveryPort}.");
 
         // 4b. Show UAC prompts on the normal (capturable) desktop instead of the secure desktop, so admin
         //     prompts are visible and clickable through Pane. UAC still asks for consent; it just isn't
@@ -109,6 +111,7 @@ public static class Installer
         Run("schtasks", $"/Delete /TN \"{TaskName}\" /F");
         Run("netsh", "advfirewall firewall delete rule name=\"Pane Host TCP\"");
         Run("netsh", "advfirewall firewall delete rule name=\"Pane Host UDP\"");
+        Run("netsh", "advfirewall firewall delete rule name=\"Pane Host Pairing\"");
         try
         {
             using var k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System");

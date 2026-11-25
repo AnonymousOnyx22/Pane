@@ -52,6 +52,10 @@ public enum MsgType : byte
     // Clipboard files, Host -> Client: HostClipBegin, FileBegin/FileChunk/FileEnd*, HostClipDone
     HostClipBegin = 66, // (none) following FileBegin streams belong to a clipboard copy
     HostClipDone = 67,  // string topLevelNames joined by '\n'
+    // One-time pairing (only on Net.PairPort)
+    PairRequest = 70,   // UTF-8 name of the PC asking to be paired (remainder)
+    PairAccept = 71,    // UTF-8 pairing key (remainder): the owner clicked Allow
+    PairDeny = 72,      // (none)
 }
 
 /// <summary>One display on the host.</summary>
@@ -207,6 +211,11 @@ public static class Messages
     public static byte[] SetCodec(byte codec) => new[] { (byte)MsgType.SetCodec, codec };
     public static byte[] SetAudio(bool on) => new[] { (byte)MsgType.SetAudio, (byte)(on ? 1 : 0) };
     public static byte[] ClipboardImage(byte[] png) => Tagged(MsgType.ClipboardImage, png);
+
+    public static byte[] PairRequest(string name) => Tagged(MsgType.PairRequest, Encoding.UTF8.GetBytes(name));
+    public static byte[] PairAccept(string key) => Tagged(MsgType.PairAccept, Encoding.UTF8.GetBytes(key));
+    public static byte[] PairDeny() => new[] { (byte)MsgType.PairDeny };
+    public static string ReadText(byte[] m) => Encoding.UTF8.GetString(m, 1, m.Length - 1);
 
     /// <summary>The payload after the 1-byte tag.</summary>
     public static ArraySegment<byte> Payload(byte[] m) => new(m, 1, m.Length - 1);

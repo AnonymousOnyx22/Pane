@@ -33,6 +33,27 @@ public partial class GridView : UserControl
         foreach (var p in _pcs) p.PropertyChanged += OnPcChanged;
         RebuildPcs();
         RebuildFound();
+        RefreshThisPc();
+    }
+
+    private void RefreshThisPc()
+    {
+        bool ready = HostSetup.IsInstalled;
+        ThisPcBtn.Visibility = ready || !HostSetup.HasPayload ? Visibility.Collapsed : Visibility.Visible;
+        ThisPcBtn.IsEnabled = true;
+        ThisPcBtn.Content = "Let this PC be controlled";
+        ThisPcText.Text = ready
+            ? "This PC can be controlled from your other PCs. Open Pane there and it will show up on its own."
+            : "Want to control this PC from another one? Set it up once here, then open Pane on the other PC.";
+    }
+
+    private async void ThisPc_Click(object sender, RoutedEventArgs e)
+    {
+        ThisPcBtn.IsEnabled = false;
+        ThisPcBtn.Content = "Setting up…";
+        var error = await System.Threading.Tasks.Task.Run(HostSetup.Install);
+        RefreshThisPc();
+        if (error != null) ThisPcText.Text = error;
     }
 
     private void OnChanged(object? s, NotifyCollectionChangedEventArgs e)

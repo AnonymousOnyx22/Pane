@@ -18,6 +18,27 @@ if (args.Length < 3)
 
 string host = args[0];
 int port = int.Parse(args[1]);
+if (args.Length > 3 && args[3].Equals("pair", StringComparison.OrdinalIgnoreCase))
+{
+    // Pairing without a key: asks the host to allow this PC (someone must click Allow on the host).
+    // args[2] is the key we EXPECT back (so the test can verify it) or "-" to just print success.
+    using var pt = new TcpClient();
+    using var pcts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+    await pt.ConnectAsync(host, Net.PairPort, pcts.Token);
+    using var pch = await SecureChannel.ClientHandshakeAsync(pt.GetStream(), PairingKey.OpenPairingSecret, pcts.Token);
+    await pch.SendAsync(Messages.PairRequest("LoopbackTest"), pcts.Token);
+    Console.WriteLine("Waiting for Allow on the host...");
+    var rep = await pch.ReceiveAsync(pcts.Token);
+    if (rep != null && Messages.TypeOf(rep) == MsgType.PairAccept)
+    {
+        var got = Messages.ReadText(rep);
+        bool ok = args[2] == "-" || got == args[2];
+        Console.WriteLine(ok ? "PASS: pairing approved, key received." : "FAIL: received a different key.");
+        return ok ? 0 : 1;
+    }
+    Console.WriteLine("FAIL: pairing was denied.");
+    return 1;
+}
 if (!PairingKey.TryDecode(args[2], out var key))
 {
     Console.WriteLine("FAIL: pairing key did not parse.");

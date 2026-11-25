@@ -8,7 +8,7 @@
 Two tiny apps that are entirely yours — encrypted, pairing-key gated, and LAN-only.</p>
 
 <p align="center"><a href="https://github.com/AnonymousOnyx22/Pane/releases/latest"><b>⬇ Download the latest release</b></a><br/>
-<code>PaneHostSetup.exe</code> on the PC you want to control · <code>Pane.exe</code> on the PC you sit at</p>
+just <code>Pane.exe</code>, run it on both PCs</p>
 
 <p align="center">
   <img alt=".NET 8" src="https://img.shields.io/badge/.NET-8.0-111111">
@@ -50,23 +50,21 @@ then opens VS Code there, so you continue the same work and the same conversatio
 Skips regenerable folders (node_modules, bin, obj, .vs, dist, build). Needs VS Code installed on the host
 and the project under your user profile.
 
-## Install the host (on the PC you want to control)
+## Set up (no keys to type)
 
-1. Copy **`dist\PaneHostSetup.exe`** to that PC and double-click it. Approve the UAC prompt.
-2. It copies the host to `C:\ProgramData\PaneHost`, registers a highest-privilege logon task (so it starts
-   automatically and elevated at every login), opens the firewall for its two ports, starts it, and prints
-   the **pairing key**. Copy that key.
+1. Put **`Pane.exe`** on both PCs and run it. It is the only file there is: the host is built into it.
+2. On the PC you want to control, click **Let this PC be controlled** and approve the Windows prompt once.
+   It installs the host to `C:\ProgramData\PaneHost`, starts it with Windows, and opens the firewall.
+3. On your other PC, open Pane. The first PC appears under **Found on your network**. Click it.
+4. A box pops up on the controlled PC: **Allow this PC?** Click **Allow** once. They are paired for good.
 
-The pairing key is **permanent** — generated once and stored in `C:\ProgramData\PaneHost\config.json`, reused
-across every restart and reconnect. To see it again at any time, run `PaneHost.exe --key`, or read the latest
-`C:\ProgramData\PaneHost\panehost.log` (the key is logged on each start).
+Security: the host can move your mouse and keyboard, so it never accepts a new PC without that click. The
+permanent key behind it lives in `C:\ProgramData\PaneHost\config.json` and is handed over automatically on
+Allow. If a PC is reinstalled and its key changes, Pane just asks you to Allow again. Advanced: the **+** tile
+still accepts an address and a key by hand, and `PaneHost.exe --key` prints the key.
 
-## Use the client (on this PC)
-
-1. Run **`dist\Pane.exe`**.
-2. The host usually appears under **Found on your network** — click it, paste the pairing key, Add.
-   Or click the **+** tile and enter the other PC's IP/hostname and key by hand.
-3. Click the tile to connect. Close the tab to return to the grid.
+## Use the client
+Click a tile to connect. Close the tab to return to the grid.
 
 ## Build from source
 
@@ -76,7 +74,7 @@ Requires the .NET 8 SDK.
 pwsh scripts/build.ps1      # publishes single-file x64 exes into dist\
 ```
 
-Produces `dist\Pane.exe`, `dist\PaneHost.exe`, and `dist\PaneHostSetup.exe` (the setup embeds the host).
+Produces `distPane.exe` (the host is built into it) and the bare `distPaneHost.exe`.
 
 ## Test
 

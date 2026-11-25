@@ -12,6 +12,10 @@ public static class PairingKey
     private const string Alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford, no I L O U
     public const int RawLength = 20;
 
+    /// <summary>Public constant used only on the pairing port; it provides encryption, not authentication.</summary>
+    public static readonly byte[] OpenPairingSecret =
+        SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("pane-open-pairing-v1"));
+
     public static byte[] Generate()
     {
         var b = new byte[RawLength];

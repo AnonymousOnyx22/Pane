@@ -12,7 +12,13 @@ public sealed class SavedPc : INotifyPropertyChanged
     public string Id { get; set; } = "";       // host GUID when known from discovery, else ""
     public string Name { get; set; } = "PC";
     public string Host { get; set; } = "";      // IP or hostname
-    public string Key { get; set; } = "";       // pairing key, Crockford base32 as shown by the host
+    private string _key = "";
+    /// <summary>Pairing key, Crockford base32. Filled in automatically by pairing; blank until then.</summary>
+    public string Key
+    {
+        get => _key;
+        set { if (_key != value) { _key = value; OnChanged(nameof(Key)); } }
+    }
 
     private bool _online;
     [JsonIgnore]

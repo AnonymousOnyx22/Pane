@@ -44,14 +44,26 @@ public partial class RemoteView : UserControl, IDisposable
         Connect();
     }
 
-    private void Connect()
+    private readonly CancellationTokenSource _pairCts = new();
+    private bool _pairing;
+
+    private async void Connect()
     {
-        if (_closed) return;
+        if (_closed || _pairing) return;
         ShowStatus("Connecting...", false);
         if (!Protocol.PairingKey.TryDecode(_pc.Key, out var key))
         {
-            ShowStatus("That pairing key is not valid.", true);
-            return;
+            // Not paired with this PC yet (or its key changed): ask it to allow us. The person at that PC
+            // clicks Allow once; nothing is typed.
+            _pairing = true;
+            ShowStatus($"Click Allow on {_pc.Name} to connect this PC…", false);
+            var (newKey, error) = await PairingClient.PairAsync(string.IsNullOrWhiteSpace(_pc.Host) ? _pc.Id : _pc.Host, _pairCts.Token);
+            _pairing = false;
+            if (_closed) return;
+            if (newKey == null) { ShowStatus(error, true); return; }
+            _pc.Key = newKey; // MainWindow saves it
+            _justPaired = true;
+            Protocol.PairingKey.TryDecode(newKey, out key);
         }
 
         _client?.Dispose();
@@ -233,14 +245,24 @@ public partial class RemoteView : UserControl, IDisposable
     {
         if (_closed) return;
         ClearPendingFrames();
+        // The PC was reinstalled or reset and has a new key: pair again automatically (once).
+        if (reason.Contains("wrong pairing key", StringComparison.OrdinalIgnoreCase) && !_justPaired)
+        {
+            _pc.Key = "";
+            Connect();
+            return;
+        }
         // Auto-reconnect: keep retrying every 2s. The manual button is still there as a nudge.
         ShowStatus("Connection lost — reconnecting…", true);
         _reconnectTimer.Stop();
         _reconnectTimer.Start();
     }
 
+    private bool _justPaired;
+
     private void OnConnected(int w, int h)
     {
+        _justPaired = false;
         ClearPendingFrames();
         _w = w; _h = h;
         _bmp = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
@@ -657,6 +679,7 @@ public partial class RemoteView : UserControl, IDisposable
     public void Dispose()
     {
         _closed = true;
+        try { _pairCts.Cancel(); } catch { }
         _reconnectTimer.Stop();
         _clipTimer?.Stop();
         _toastTimer?.Stop();

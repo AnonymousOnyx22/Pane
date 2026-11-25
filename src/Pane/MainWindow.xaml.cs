@@ -40,7 +40,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         foreach (var p in PcStore.Load()) _pcs.Add(p);
         _pcs.CollectionChanged += (_, __) => PcStore.Save(_pcs);
-        foreach (var p in _pcs) p.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(SavedPc.Name)) PcStore.Save(_pcs); };
+        foreach (var p in _pcs) Track(p);
 
         var grid = new GridView(_pcs, _found);
         grid.Open += OpenSession;
@@ -304,25 +304,31 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SelectTab(next);
     }
 
+    /// <summary>Save the PC list whenever a PC is renamed or gets (or loses) its pairing key.</summary>
+    private void Track(SavedPc p) => p.PropertyChanged += (_, e) =>
+    {
+        if (e.PropertyName is nameof(SavedPc.Name) or nameof(SavedPc.Key)) PcStore.Save(_pcs);
+    };
+
     private void OnAddRequested()
     {
         var dlg = new AddPcDialog { Owner = this };
         if (dlg.ShowDialog() == true && dlg.Result != null)
         {
-            dlg.Result.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(SavedPc.Name)) PcStore.Save(_pcs); };
+            Track(dlg.Result);
             _pcs.Add(dlg.Result);
+            OpenSession(dlg.Result);
         }
     }
 
+    /// <summary>A PC found on the network: add it and connect straight away. Pairing happens on its own.</summary>
     private void OnAddDiscovered(DiscoveredHost h)
     {
-        var dlg = new AddPcDialog(h.Name, h.Ip) { Owner = this };
-        if (dlg.ShowDialog() == true && dlg.Result != null)
-        {
-            dlg.Result.Id = h.HostId.ToString();
-            _pcs.Add(dlg.Result);
-            _found.Remove(h);
-        }
+        var pc = new SavedPc { Id = h.HostId.ToString(), Name = h.Name, Host = h.Ip };
+        Track(pc);
+        _pcs.Add(pc);
+        _found.Remove(h);
+        OpenSession(pc);
     }
 
     // --- title bar / window buttons ---

@@ -49,6 +49,8 @@ AppDomain.CurrentDomain.ProcessExit += (_, _) => appCts.Cancel();
 var discovery = new DiscoveryBroadcaster(cfg.Id, Net.TcpPort, Environment.MachineName);
 _ = discovery.RunAsync(appCts.Token);
 
+_ = new PairingService(cfg).RunAsync(appCts.Token);
+
 var listener = new TcpListener(IPAddress.Any, Net.TcpPort);
 listener.Start();
 Log.Info($"Listening for clients on TCP {Net.TcpPort}.");

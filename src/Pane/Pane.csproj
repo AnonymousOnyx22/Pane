@@ -5,7 +5,12 @@
     <ProjectReference Include="..\Pane.Media\Pane.Media.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
+  <!-- The published host exe is staged into embed/ by scripts/build.ps1 and embedded here, so Pane.exe is
+       the only file anyone needs: it can install the host on any PC it runs on. -->
+  <ItemGroup Condition="Exists('embed\PaneHost.exe')">
+    <EmbeddedResource Include="embed\PaneHost.exe">
+      <LogicalName>PaneHost.exe</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <PropertyGroup>

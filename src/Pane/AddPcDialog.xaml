@@ -21,7 +21,7 @@
             <TextBlock Text="IP address or hostname" Foreground="{StaticResource FgDim}" FontSize="12" Margin="2,14,0,6"/>
             <TextBox x:Name="HostBox" Style="{StaticResource PaneTextBox}"/>
 
-            <TextBlock Text="Pairing key" Foreground="{StaticResource FgDim}" FontSize="12" Margin="2,14,0,6"/>
+            <TextBlock Text="Pairing key (leave empty: the other PC will ask you to Allow)" Foreground="{StaticResource FgDim}" FontSize="12" Margin="2,14,0,6"/>
             <TextBox x:Name="KeyBox" Style="{StaticResource PaneTextBox}"/>
 
             <TextBlock x:Name="ErrorText" Foreground="{StaticResource Fg}" FontSize="12" Margin="2,12,0,0"

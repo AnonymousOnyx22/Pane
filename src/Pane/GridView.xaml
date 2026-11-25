@@ -11,6 +11,14 @@
             <TextBlock x:Name="FoundLabel" Text="Found on your network" Foreground="{StaticResource FgDim}"
                        FontSize="12" Margin="4,26,0,12" Visibility="Collapsed"/>
             <WrapPanel x:Name="FoundPanel" Orientation="Horizontal"/>
+
+            <!-- This PC as a target: one click installs the host that's built into Pane.exe. -->
+            <StackPanel x:Name="ThisPcPanel" Margin="4,26,0,0">
+                <TextBlock x:Name="ThisPcText" Foreground="{StaticResource FgDim}" FontSize="12" Margin="0,0,0,10"
+                           TextWrapping="Wrap" MaxWidth="460"/>
+                <Button x:Name="ThisPcBtn" Content="Let this PC be controlled" Style="{StaticResource PillButton}"
+                        HorizontalAlignment="Left" Click="ThisPc_Click"/>
+            </StackPanel>
         </StackPanel>
     </ScrollViewer>
 </UserControl>

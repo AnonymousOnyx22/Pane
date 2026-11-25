@@ -18,7 +18,7 @@ public partial class AddPcDialog : Window
         Opacity = 0;
         Loaded += (_, __) =>
         {
-            (string.IsNullOrEmpty(host) ? HostBox : KeyBox).Focus();
+            (string.IsNullOrEmpty(host) ? HostBox : NameBox).Focus();
             var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
             BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, new Duration(TimeSpan.FromMilliseconds(180))));
             var s = new DoubleAnimation(0.96, 1, new Duration(TimeSpan.FromMilliseconds(240))) { EasingFunction = ease };
@@ -33,7 +33,7 @@ public partial class AddPcDialog : Window
         var host = HostBox.Text.Trim();
         var key = KeyBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(host)) { Error("Enter the PC's IP address or hostname."); return; }
-        if (!Protocol.PairingKey.TryDecode(key, out _)) { Error("That pairing key does not look right."); return; }
+        if (key.Length > 0 && !Protocol.PairingKey.TryDecode(key, out _)) { Error("That pairing key does not look right."); return; }
 
         Result = new SavedPc
         {
